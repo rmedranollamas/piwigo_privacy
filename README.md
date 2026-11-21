@@ -1,61 +1,68 @@
-# piwigio_privacy
-A plugin to increase the privacy of Piwigo gallery
+# `piwigo_privacy` (2026 / v2.0)
 
-Piwigo privacy will validate users before allowing
-access to Piwigo images and other uploaded files.
+Privacy and access-control gatekeeper plugin for **Piwigo 16+**, **PHP 8.2–8.5**, and **Nginx (`X-Accel-Redirect`)**.
 
-It has two modes of operations
-- Naive - all images are directed to `get.php` where access is analyzed derivative are created and files are served
-- Advanced - Using a custom web server configuration (see [piwigo-nginx-site](piwigo-nginx-site) for NGINX sample) `get.php` will validate files and create derivative but will pass the actual serving of files to the web server.
+Enforces Piwigo user, group, album, privacy-level, HD resolution (`enabled_high`), `Piwigo-private_share`, `pwg_format/`, `piwigo_lounge`, and `X-PIWIGO-API` permissions on every media file—originals, `pwg_representative` posters, RAW/sidecar formats, and all `i.php` / `_data/i/` derivatives.
 
-*Notice* that with both modes you need to make sure your static file folders are blocked from public web access
-You should also disable `i.php` script since it sends files back to the client without validating the permissions.
-You can look at [piwigo-nginx-site](piwigo-nginx-site) which does all of that.
+## Architecture Overview (v2.0)
 
-## Install
-Clone the repository to your in your Piwigo plugins folder (should create the path `plugins/piwigo_privacy`)
-in Piwigo config file (`local/config/config.inc.php`) set `derivative_url_style` config to `1` -
+`piwigo_privacy` runs in two modes:
 
-```php
-$conf['derivative_url_style']=1;
-```
+1. **Transparent Nginx Gatekeeper (Recommended):**
+   * Nginx intercepts `/upload/`, `/galleries/`, `/_data/i/`, `/i.php`, and `/i` using regex-immune `^~` prefix / script locations and forwards them to [get.php](get.php).
+   * [get.php](get.php) authenticates the visitor (cookie session, `?auth=`, `?pshare=`, or Piwigo 16 `X-PIWIGO-API`), **closes the PHP session lock immediately** (avoiding HTTP/2 & HTTP/3 serialization), verifies permissions via indexed database lookups, generates missing/stale derivatives with `i.php` parity + advisory `flock` + atomic writes, and hands delivery back to Nginx via `X-Accel-Redirect: /_pwg_priv/...`.
+   * Canonical Piwigo URLs stay untouched, making Web Services (`ws.php`), mobile apps, `piwigo-videojs`, `bootstrap_darkroom`, and **all** `$conf['derivative_url_style']` settings (`0` Auto, `1` Static, `2` `i.php`) work out of the box.
+2. **Standalone PHP Mode (Fallback):**
+   * When neither `piwigo_privacy_redirect_header` nor `piwigo_privacy_mode = 'nginx'` is set, URLs are rewritten idempotently to `plugins/piwigo_privacy/get.php?img_id=...&file=...` and served directly by PHP with RFC 9110 Byte-Range (`206`), `ETag`/`304`, `HEAD`, and modern 2026 MIME types.
 
-Go to Piwigo admin panel and under plugins management activate `piwigo_privacy`
+---
 
-If you want to use *advance mode* with *NGINX* also set the config -
+## Installation (Nginx + Piwigo 16)
+
+1. Place this plugin in `plugins/piwigo_privacy` (directory names such as `piwigo_privacy-master` are also supported automatically). No Composer dependencies are required at runtime.
+2. Activate **piwigo_privacy** in *Admin -> Plugins -> Manage*. All `$conf['derivative_url_style']` values (`0`, `1`, `2`) are supported.
+3. Configure `local/config/config.inc.php`:
 
 ```php
 $conf['piwigo_privacy_redirect_header'] = 'X-Accel-Redirect';
 ```
 
-Using a different server that supports `X-send-files` might be possible by settings the headers accordingly but this plugin was only tested with NGINX. if you get it to work with other servers a pull request with a sample configuration would be appreciated.
+4. Apply the hardened server configuration in [piwigo-nginx-site](piwigo-nginx-site) (adjusting `server_name`, `root`, `/_pwg_priv/*` aliases, TLS certificates, and `$php_fpm_upstream`).
+5. Visit *Admin -> Plugins -> Piwigo Privacy* and click **Run Perimeter Check** to verify direct access to `/local/`, `/_data/logs/`, `/upload/`, and `/i.php` is locked down.
 
+> [!NOTE]
+> **Upgrading from v1.x:** Legacy `auth.php` has been removed due to security flaws. Replace old v1.x `location /upload { internal; }` Nginx blocks with the updated [piwigo-nginx-site](piwigo-nginx-site) rules (which use `/_pwg_priv/` `internal;` aliases and `^~` interception). Previously cached legacy `/<id>/upload/...` URLs continue to be accepted by `get.php`.
 
-### Less strict configuration
-On most Piwigo installs you'll never need to enable the following configs.
-This configs are only necessary if you imported your Piwigo gallery from a different system and your previous
-gallery contained paths with spaces or special chars.
+---
 
-**Note** that some web apps might be vulnerable to code and command injections by passing weird formatted file names
-I am not aware of any such vulnerabilities in this plugin or in Piwigo but allowing whitespaces or special chars might increase
-the likelihood of such attack. (so only enable the following config options if some of your images fail to load properly)
+## Configuration Options (`local/config/config.inc.php`)
 
-If your file names or paths contain spaces you might need to allow whitespace in file names
-```php
-$conf['piwigo_privacy_allow_whitespaces'] = true;
+| Config Key | Default | Description |
+| :--- | :--- | :--- |
+| `$conf['piwigo_privacy_redirect_header']` | `null` | Set `'X-Accel-Redirect'` to enable Nginx zero-copy mode. |
+| `$conf['piwigo_privacy_mode']` | Auto | Force `'nginx'` or `'php'`. |
+| `$conf['piwigo_privacy_internal_prefix']` | `'/_pwg_priv/'` | Internal Nginx `location ^~ ... { internal; alias ...; }` prefix. |
+| `$conf['piwigo_privacy_rewrite_urls']` | `false` in Nginx, `true` in PHP | Override URL rewriting behavior (transparent interception requires `false`). |
+| `$conf['piwigo_privacy_base_path']` | Auto from `SCRIPT_NAME` | Explicit URL base path for custom subpath reverse proxies (e.g. `'/piwigo/'`). |
+| `$conf['piwigo_privacy_cache_control']` | `'private, max-age=300, must-revalidate'` | `Cache-Control` response header (always uses `private`; never `public`). |
+| `$conf['piwigo_privacy_corp']` | `'same-origin'` | `Cross-Origin-Resource-Policy` header (`'same-origin'`, `'same-site'`, etc.). |
+| `$conf['piwigo_privacy_strip_metadata']` | `false` | Force stripping EXIF/IPTC metadata on **all** generated derivatives regardless of pixel threshold. |
+| `$conf['piwigo_privacy_default_redirect']` | `false` | Redirect denied media requests (`302 Found`, no-store) to fallback image instead of `401`/`403`. |
+| `$conf['piwigo_privacy_default_image']` | `default.png` | Custom fallback image URL when `piwigo_privacy_default_redirect` is enabled. |
+| `$conf['piwigo_privacy_allow_whitespaces']` | `false` | Permit spaces in synchronized filenames while preserving `sync_chars_regex`. |
+| `$conf['piwigo_privacy_allow_special_chars']` | `false` | Permit UTF-8 / special characters in filenames (traversal & control bytes stay unconditionally blocked). |
+| `$conf['piwigo_privacy_log_denials']` | `false` | Log rejected media requests to Piwigo's `$logger->debug()`. |
+| `$conf['piwigo_privacy_debug']` | `false` | Enable detailed internal denial logging. |
+
+---
+
+## Development & Automated Verification
+
+Composer dev dependencies are strictly for local/CI verification and are not needed in production installs:
+
+```bash
+composer install
+composer lint       # php -l across all PHP files
+composer phpstan    # PHPStan level 8 static analysis
+composer test       # Nette Tester suite (unit, security regression, subprocess E2E)
 ```
-
-If your file names or paths contain special chars you'll need to allow special chars in file names
-```php
-$conf['piwigo_privacy_allow_special_chars'] = true;
-```
-
-## Disclaimer
-This plugin is a lot more complex than my initial implementation.
-
-I can assume many performance improvements can be made since performance wasn't one of my main goals in implementing it.
-
-Though I hope it improves the privacy of you Piwigo install you should be aware that Piwigo security implementations are very naive and proper Documentation is scares, I tried to do my best so this plugin won't introduce any new security issues and hopefully help to mitigate any existing ones but it still might be possible to bypass this plugin and get access to images (With my previous implementation for example I was completely unaware that Piwigo built in `i.php` does not validate user permissions when serving images).
-
-
-_For more information about the idea behind this plugin and the previous implementation check out my blog post about [Securing Private Piwigo Albums](https://ca.non.co.il/index.php/securing-private-piwigo-albums/)_

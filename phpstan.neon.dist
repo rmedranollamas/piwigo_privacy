@@ -1,0 +1,16 @@
+parameters:
+  level: 8
+  paths:
+    - include
+    - main.inc.php
+    - maintain.class.php
+    - get.php
+    - admin.php
+  scanFiles:
+    - tests/stubs/piwigo_stubs.php
+  dynamicConstantNames:
+    - PHPWG_ROOT_PATH
+    - PWG_DERIVATIVE_DIR
+  ignoreErrors:
+    - message: '#Function PiwigoPrivacy\\(pwg_query|pwg_db_fetch_assoc|single_update|mkgetdir|check_status|is_admin|is_a_guest|get_boolean|get_sql_condition_FandF|original_to_representative|original_to_format|auth_key_login|build_user|trigger_notify|derivative_to_url|char_to_fraction) not found\.#'
+      reportUnmatched: false
