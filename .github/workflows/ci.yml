@@ -4,6 +4,7 @@ on:
   push:
     branches: [master, main, modernize-2026]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   php:
