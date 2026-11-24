@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main, modernize-2026]
+  pull_request:
+
+jobs:
+  php:
+    name: PHP ${{ matrix.php }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.2', '8.3', '8.4', '8.5']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP ${{ matrix.php }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: mbstring, exif, fileinfo, gd, mysqli
+          coverage: none
+
+      - name: Install Composer dev dependencies
+        run: composer install --no-interaction --no-progress
+
+      - name: Syntax check (php -l)
+        run: composer lint
+
+      - name: Static analysis (PHPStan level 8)
+        if: matrix.php != '8.5'
+        run: composer phpstan
+
+      - name: Run Nette Tester suite
+        run: composer test
+
+  nginx-config:
+    name: Nginx + PHP-FPM End-to-End Perimeter Test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nginx & PHP-FPM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nginx php-fpm curl
+
+      - name: Provision mock Piwigo root & configure piwigo-nginx-site
+        run: |
+          sudo mkdir -p /var/www/piwigo/{include,upload/2026,galleries,local/config,_data/logs,_data/combined,_data/i,.well-known/acme-challenge,plugins/piwigo_privacy}
+          sudo cp -r ./* /var/www/piwigo/plugins/piwigo_privacy/
+          echo "secret-db" | sudo tee /var/www/piwigo/local/config/database.inc.php >/dev/null
+          echo "secret-log" | sudo tee /var/www/piwigo/_data/logs/test.txt >/dev/null
+          printf "SECRET_JPEG_BYTES" | sudo tee /var/www/piwigo/upload/2026/secret.jpg >/dev/null
+          echo "body{}" | sudo tee /var/www/piwigo/_data/combined/app.css >/dev/null
+          echo "acme-ok" | sudo tee /var/www/piwigo/.well-known/acme-challenge/token123 >/dev/null
+
+          cat <<'EOF' | sudo tee /var/www/piwigo/include/common.inc.php >/dev/null
+          <?php
+          define('IMAGES_TABLE', 'piwigo_images');
+          define('CATEGORIES_TABLE', 'piwigo_categories');
+          define('IMAGE_CATEGORY_TABLE', 'piwigo_image_category');
+          define('ACCESS_GUEST', 0);
+          $conf = [
+            'piwigo_privacy_redirect_header' => 'X-Accel-Redirect',
+            'data_location' => '_data/',
+            'picture_ext' => ['jpg', 'png', 'webp'],
+            'file_ext' => ['jpg', 'png', 'webp', 'mp4'],
+          ];
+          $user = ['id' => 2, 'level' => 0, 'enabled_high' => 'false'];
+          function check_status($lvl) {}
+          function is_admin() { return ($GLOBALS['user']['id'] ?? 2) === 1; }
+          function is_a_guest() { return ($GLOBALS['user']['id'] ?? 2) === 2; }
+          function get_boolean($v) { return $v === true || $v === 'true'; }
+          function get_absolute_root_url($s = true) { return 'http://127.0.0.1:8088/'; }
+          function pwg_db_real_escape_string($s) { return addslashes($s); }
+          function auth_key_login($h, $b = false) {
+            if ($h === 'pkid-20261116-abcdef12345678901234:citoken') {
+              $GLOBALS['user']['id'] = 1;
+              return true;
+            }
+            return false;
+          }
+          function build_user($uid, $c = true) { return ['id' => $uid, 'level' => 8, 'enabled_high' => 'true']; }
+          function trigger_notify($e, ...$a) {}
+          function get_sql_condition_FandF($f, $p = null) { return ''; }
+          function pwg_query($q) {
+            if (strpos($q, 'FROM `piwigo_images`') !== false) {
+              return [['id' => 7, 'path' => './upload/2026/secret.jpg', 'width' => 500, 'height' => 400, 'level' => 8]];
+            }
+            return [];
+          }
+          function pwg_db_fetch_assoc(&$rows) {
+            $r = array_shift($rows);
+            return $r === null ? false : $r;
+          }
+          final class SrcImage {
+            public function __construct($i) {}
+            public function is_original() { return true; }
+          }
+          final class DerivativeImage {
+            public static function get_one($t, $s) { return new self(); }
+            public function same_as_source() { return true; }
+          }
+          EOF
+          echo '<?php' | sudo tee /var/www/piwigo/include/functions_picture.inc.php >/dev/null
+
+          FPM_SOCK=$(ls /run/php/php*-fpm.sock | head -n1)
+          # Also add a static image regex rule inside server{} to prove ^~ blocks regex bypasses (SEC-04).
+          sudo sed \
+            -e 's|listen 80;|listen 127.0.0.1:8088;|' \
+            -e '/listen \[::\]:80;/d' \
+            -e "s|unix:/run/php-fpm/www.sock|unix:${FPM_SOCK}|" \
+            -e 's@# Standard Piwigo PHP execution@location ~* \\.(jpg|png|mp4)$ { return 200 "LEAKED"; }\n\t# Standard Piwigo PHP execution@' \
+            piwigo-nginx-site | sudo tee /etc/nginx/sites-enabled/piwigo-test >/dev/null
+          sudo rm -f /etc/nginx/sites-enabled/default
+          sudo nginx -t
+          sudo systemctl restart nginx
+
+      - name: Assert security perimeter, X-Accel-Redirect, and i.php routing via HTTP
+        run: |
+          set -euo pipefail
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8088/local/config/database.inc.php)" = "403"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8088/_data/logs/test.txt)" = "403"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8088/plugins/piwigo_privacy/piwigo-nginx-site)" = "403"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8088/.well-known/acme-challenge/token123)" = "200"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8088/_data/combined/app.css)" = "200"
+          # Ensure /_pwg_priv internal alias cannot be requested externally.
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8088/_pwg_priv/upload/2026/secret.jpg)" = "404"
+          # Direct get.php hit returns 400 cleanly.
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8088/plugins/piwigo_privacy/get.php)" = "400"
+          # Guest access to /upload/secret.jpg and /i.php?/upload/... returns 401 (NOT bypassed by regex!).
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8088/upload/2026/secret.jpg)" = "401"
+          test "$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8088/i.php?/upload/2026/secret-me.jpg')" = "401"
+          # Authenticated X-PIWIGO-API serves actual bytes via X-Accel-Redirect with private headers!
+          HEADERS=$(mktemp)
+          BODY=$(curl -s -D "$HEADERS" -H "X-PIWIGO-API: pkid-20261116-abcdef12345678901234:citoken" http://127.0.0.1:8088/upload/2026/secret.jpg)
+          cat "$HEADERS"
+          grep -qi '^HTTP/.* 200' "$HEADERS"
+          grep -qi '^Cache-Control: private' "$HEADERS"
+          grep -qi '^X-Content-Type-Options: nosniff' "$HEADERS"
+          test "$BODY" = "SECRET_JPEG_BYTES"

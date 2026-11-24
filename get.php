@@ -1,71 +1,67 @@
 <?php
+declare(strict_types=1);
+
 // +-----------------------------------------------------------------------+
-// | Piwigo-Privacy - keep your piwigo content private                     |
+// | Piwigo-Privacy - keep your Piwigo content private                     |
 // +-----------------------------------------------------------------------+
-// | Copyright(C) 2017 Yoni jah                                             |
-// | Based on action.php file from Piwigo gallery                          |
-// +-----------------------------------------------------------------------+
-// | This program is free software; you can redistribute it and/or modify  |
-// | it under the terms of the GNU General Public License as published by  |
-// | the Free Software Foundation                                          |
-// |                                                                       |
-// | This program is distributed in the hope that it will be useful, but   |
-// | WITHOUT ANY WARRANTY; without even the implied warranty of            |
-// | MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU      |
-// | General Public License for more details.                              |
-// |                                                                       |
-// | You should have received a copy of the GNU General Public License     |
-// | along with this program; if not, write to the Free Software           |
-// | Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, |
-// | USA.                                                                  |
+// | Copyright(C) 2017-2026 Yoni Jah / rmedranollamas                      |
+// | GNU General Public License v2.0 or later                              |
 // +-----------------------------------------------------------------------+
 
-defined('PHPWG_ROOT_PATH') or define('PHPWG_ROOT_PATH','../../');
-session_cache_limiter('public');
-include_once(PHPWG_ROOT_PATH.'include/common.inc.php');
-include_once(PHPWG_ROOT_PATH . 'admin/include/image.class.php');
-include_once('./helper_funcs.inc.php');
+spl_autoload_register(static function (string $class): void {
+    $prefix = 'PiwigoPrivacy\\';
+    if (!str_starts_with($class, $prefix)) {
+        return;
+    }
+    $relative = substr($class, strlen($prefix));
+    if (str_contains($relative, '..') || str_contains($relative, "\0")) {
+        return;
+    }
+    $file = __DIR__ . '/include/' . str_replace('\\', '/', $relative) . '.php';
+    if (is_file($file)) {
+        require_once $file;
+    }
+});
 
-defined('PWG_DERIVATIVE_DIR') or define('PWG_DERIVATIVE_DIR', $conf['data_location'].'i/');
+PiwigoPrivacy\Authenticator::prepareSessionHeaders();
 
-global $conf;
-
-if (isset($conf['piwigo_privacy_redirect_header'])) {
-	$full_path = filter_input(INPUT_SERVER, 'REQUEST_URI', FILTER_SANITIZE_URL);
-	if (!$full_path) {
-		pwg_privacy_reject_access('Could not get url path');
-	}
-	list($img_id, $req_path) = explode('/', ltrim($full_path, '/'), 2);
-	if (!is_numeric($img_id) && $img_id == (int)$img_id ) {
-		pwg_privacy_reject_access("Image id '$img_id' is not numeric $full_path");
-	}
-	$req_path = urldecode($req_path);
-} else {
-	$img_id = filter_input(INPUT_GET, 'img_id', FILTER_VALIDATE_INT);
-	$req_path = filter_input(INPUT_GET, 'file', FILTER_UNSAFE_RAW);
+if (!defined('PHPWG_ROOT_PATH')) {
+    $pwgRoot = '../../';
+    if (!is_file(__DIR__ . '/../../include/common.inc.php')) {
+        $cwd = getcwd();
+        if (is_string($cwd) && is_file($cwd . '/../../include/common.inc.php')) {
+            $resolved = realpath($cwd . '/../..');
+            if ($resolved !== false) {
+                $pwgRoot = rtrim($resolved, DIRECTORY_SEPARATOR) . '/';
+            }
+        } elseif (isset($_SERVER['SCRIPT_FILENAME']) && is_string($_SERVER['SCRIPT_FILENAME'])) {
+            $candidateRoot = dirname($_SERVER['SCRIPT_FILENAME'], 3) . '/';
+            if (is_file($candidateRoot . 'include/common.inc.php')) {
+                $pwgRoot = $candidateRoot;
+            }
+        }
+    }
+    define('PHPWG_ROOT_PATH', $pwgRoot);
 }
 
-//reject access if no id or path
-if ( !$img_id || !$req_path ) {
-	pwg_privacy_reject_access('Could not find image id or path');
-}
+include_once PHPWG_ROOT_PATH . 'include/common.inc.php';
+include_once PHPWG_ROOT_PATH . 'include/functions_picture.inc.php';
 
-if (strpos($req_path, 'i.php?') === 0) {
-	$req_path = PWG_DERIVATIVE_DIR . substr($req_path, 6);
-}
+global $conf, $user;
+$confArr = is_array($conf ?? null) ? $conf : [];
+$userArr = is_array($user ?? null) ? $user : [];
 
-$allow_whitespaces = isset($conf['piwigo_privacy_allow_whitespaces']) && $conf['piwigo_privacy_allow_whitespaces'] === true;
-$allow_special_chars = isset($conf['piwigo_privacy_allow_special_chars']) && $conf['piwigo_privacy_allow_special_chars'] === true;
+defined('PWG_DERIVATIVE_DIR') or define('PWG_DERIVATIVE_DIR', ($confArr['data_location'] ?? '_data/') . 'i/');
 
-$req_path = pwg_privacy_sanitize_path($req_path, $allow_whitespaces, $allow_special_chars);
-if (!$req_path) {
-	pwg_privacy_reject_access('Could not sanitize path');
-}
+$config = PiwigoPrivacy\Config::fromPiwigoConf($confArr, basename(__DIR__));
+$responder = new PiwigoPrivacy\MediaResponder();
+$absoluteRootUrl = function_exists('get_absolute_root_url') ? (string) get_absolute_root_url(false) : '/';
 
-$path = pwg_privacy_verify_access($img_id, $req_path);
-
-if (!$path) {
-	pwg_privacy_reject_access('Access was rejected');
-}
-
-pwg_privacy_serve_file($path);
+PiwigoPrivacy\FrontController::handle(
+    $_SERVER,
+    $config,
+    $userArr,
+    PHPWG_ROOT_PATH,
+    $responder,
+    $absoluteRootUrl
+);

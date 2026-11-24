@@ -1,95 +1,222 @@
 <?php
+declare(strict_types=1);
+
 /*
-Version: 1.0.1
 Plugin Name: piwigo_privacy
+Version: auto
+Description: Keep your Piwigo gallery media private with Nginx X-Accel-Redirect, full i.php derivative access control, and Piwigo 16 support.
 Plugin URI: http://piwigo.org/ext/extension_view.php?eid=849
-Author: Yoni Jah
-Description: Make sure only secure access is allowed to your gallery images
-Author URI: https://github.com/yonjah/piwigo_privacy
+Author: Yoni Jah / rmedranollamas
+Author URI: https://github.com/rmedranollamas/piwigo_privacy
+Has Settings: true
 */
 
-// Check whether we are indeed included by Piwigo.
-if (!defined('PHPWG_ROOT_PATH')) die('Hacking attempt!');
-global $conf;
+if (!defined('PHPWG_ROOT_PATH')) {
+    die('Hacking attempt!');
+}
 
-if ($conf['derivative_url_style'] !== 1) {
-	global $page;
-	$page['errors'][] = 'Piwigo privacy requires config derivative_url_style to be set to 1 but it is set to '.$conf['derivative_url_style'].'. Plugin has been disabled';
-} else {
-	add_event_handler('get_derivative_url', 'pwg_privacy_plugin_replace_derivative_url');
-	add_event_handler('get_src_image_url', 'pwg_privacy_plugin_replace_url');
-	add_event_handler('picture_pictures_data', 'pwg_privacy_plugin_replace_picture');
+spl_autoload_register(static function (string $class): void {
+    $prefix = 'PiwigoPrivacy\\';
+    if (!str_starts_with($class, $prefix)) {
+        return;
+    }
+    $relative = substr($class, strlen($prefix));
+    if (str_contains($relative, '..') || str_contains($relative, "\0")) {
+        return;
+    }
+    $file = __DIR__ . '/include/' . str_replace('\\', '/', $relative) . '.php';
+    if (is_file($file)) {
+        require_once $file;
+    }
+});
+
+/**
+ * Returns the cached normalized Config object for the current request.
+ */
+function pwg_privacy_get_config(): PiwigoPrivacy\Config
+{
+    global $conf;
+    return PiwigoPrivacy\Config::fromPiwigoConf(is_array($conf) ? $conf : [], basename(__DIR__));
+}
+
+add_event_handler('get_admin_plugin_menu_links', 'pwg_privacy_admin_menu');
+
+/**
+ * Registers the Admin -> Plugins configuration & diagnostics link.
+ *
+ * @param array<int, array<string, string>> $menu
+ * @return array<int, array<string, string>>
+ */
+function pwg_privacy_admin_menu($menu)
+{
+    $dir = basename(__DIR__);
+    $url = $dir === 'piwigo_privacy'
+        ? get_root_url() . 'admin.php?page=plugin-piwigo_privacy'
+        : get_root_url() . 'admin.php?page=plugin&section=' . rawurlencode($dir . '/admin.php');
+
+    $menu[] = [
+        'NAME' => 'Piwigo Privacy',
+        'URL' => $url,
+    ];
+    return $menu;
+}
+
+// Early priority ensures compatibility ahead of plugins like piwigo-videojs and bootstrap_darkroom.
+$pwgPrivacyPriority = defined('EVENT_HANDLER_PRIORITY_NEUTRAL') ? EVENT_HANDLER_PRIORITY_NEUTRAL - 20 : 30;
+add_event_handler('get_derivative_url', 'pwg_privacy_plugin_replace_derivative_url', $pwgPrivacyPriority);
+add_event_handler('loc_action_before_http_headers', 'pwg_privacy_harden_action_download');
+
+if (pwg_privacy_get_config()->rewriteUrls) {
+    add_event_handler('get_src_image_url', 'pwg_privacy_plugin_replace_url', $pwgPrivacyPriority);
+    add_event_handler('picture_pictures_data', 'pwg_privacy_plugin_replace_picture', $pwgPrivacyPriority);
 }
 
 /**
-* Allows us to replace the url (by changing rel_path) of an image without changing it's path
-**/
-class SrcImageProxy {
-	private $image;
-	private $orig_path;
+ * Replaces Cache-Control: public in core action.php, releases session lock,
+ * and offloads local file downloads to Nginx X-Accel-Redirect when enabled.
+ */
+function pwg_privacy_harden_action_download(): void
+{
+    global $file, $element_info;
 
-	public function __construct(SrcImage $image) {
-	    $this->image = $image;
-		$this->orig_path = $image->get_path();
-	}
+    PiwigoPrivacy\Authenticator::releaseSessionLock();
 
-	public function __get($name) {
-	    return $this->image->$name;
-	}
+    if (function_exists('header_remove')) {
+        @header_remove('Expires');
+        @header_remove('Pragma');
+    }
 
-	public function __set($name, $value) {
-	    return $this->image->$name = $value;
-	}
+    $config = pwg_privacy_get_config();
+    $ext = is_string($file) ? strtolower(pathinfo($file, PATHINFO_EXTENSION)) : '';
 
-	public function __call($method, $args) {
-		if ($method === 'get_path') {
-			return $this->orig_path;
-		}
-		return call_user_func_array(array($this->image, $method), $args);
-	}
+    header('Cache-Control: private, no-store, no-cache, must-revalidate', true);
+    header('Vary: Cookie, X-PIWIGO-API');
+    header('X-Content-Type-Options: nosniff');
+    header('Cross-Origin-Resource-Policy: ' . $config->corp);
+    header('Referrer-Policy: same-origin');
+
+    if (in_array($ext, ['svg', 'svgz', 'pdf', 'html', 'htm', 'xml'], true)) {
+        header("Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox");
+    }
+
+    if ($config->mode !== PiwigoPrivacy\Config::MODE_NGINX
+        || $config->redirectHeader === null
+        || !is_string($file)
+        || $file === ''
+        || (function_exists('url_is_remote') && url_is_remote($file))
+    ) {
+        return;
+    }
+
+    if (!@is_readable($file)) {
+        return;
+    }
+
+    // Normalize relative path against PHPWG_ROOT_PATH and verify it maps to an internal Nginx media root.
+    $rel = $file;
+    $rootPath = defined('PHPWG_ROOT_PATH') ? (string) constant('PHPWG_ROOT_PATH') : './';
+    if ($rootPath !== './' && str_starts_with($rel, $rootPath)) {
+        $rel = substr($rel, strlen($rootPath));
+    }
+    if (str_starts_with($rel, './')) {
+        $rel = substr($rel, 2);
+    } elseif (str_starts_with($rel, '../')) {
+        $rel = substr($rel, 3);
+    }
+    $rel = ltrim($rel, '/');
+    $segments = explode('/', $rel);
+    $firstSeg = $segments[0];
+
+    if (!in_array($firstSeg, $config->getAllowedMediaRoots(false), true)) {
+        return;
+    }
+
+    if (isset($_GET['download'])) {
+        $downloadName = is_array($element_info) && isset($element_info['file']) && is_string($element_info['file'])
+            ? htmlspecialchars_decode($element_info['file'])
+            : basename($rel);
+        $safeAscii = preg_replace('/[^\x20-\x7E]/', '_', str_replace(['"', '\\', "\r", "\n"], '_', $downloadName));
+        $utf8Encoded = rawurlencode($downloadName);
+        header('Content-Disposition: attachment; filename="' . $safeAscii . '"; filename*=UTF-8\'\'' . $utf8Encoded);
+    } else {
+        $inlineName = basename($rel);
+        $safeAscii = preg_replace('/[^\x20-\x7E]/', '_', str_replace(['"', '\\', "\r", "\n"], '_', $inlineName));
+        header('Content-Disposition: inline; filename="' . $safeAscii . '"');
+    }
+
+    $internalUri = PiwigoPrivacy\MediaResponder::buildInternalRedirectPath('./' . $rel, $config->internalPrefix);
+    header($config->redirectHeader . ': ' . $internalUri);
+    exit();
 }
 
-function pwg_privacy_plugin_replace_picture ($picture) {
-	foreach ($picture as $key => &$image) {
-		if (isset($image['element_url'])) {
-			$image['element_url'] = pwg_privacy_modify_url($image['element_url'], $image['id']);
-		}
-		if (isset($image['src_image'])) {
-			$image['src_image'] = new SrcImageProxy($image['src_image']);
-			$image['src_image']->rel_path = pwg_privacy_modify_url($image['src_image']->rel_path, $image['src_image']->id);
-		}
-	}
-	return $picture;
+/**
+ * Rewrites ONLY $image['element_url'] in PHP-rewrite fallback mode without ever proxying/mutating SrcImage.
+ *
+ * @param mixed $picture
+ * @return mixed
+ */
+function pwg_privacy_plugin_replace_picture($picture)
+{
+    if (!is_array($picture)) {
+        return $picture;
+    }
+
+    $config = pwg_privacy_get_config();
+    $rootUrl = function_exists('get_root_url') ? (string) get_root_url() : './';
+
+    foreach ($picture as &$image) {
+        if (!is_array($image)) {
+            continue;
+        }
+        if (isset($image['element_url']) && is_string($image['element_url']) && isset($image['id'])) {
+            $image['element_url'] = PiwigoPrivacy\UrlRewriter::modifyUrl(
+                $image['element_url'],
+                $image['id'],
+                $config,
+                $rootUrl
+            );
+        }
+    }
+    unset($image);
+
+    return $picture;
 }
 
-function pwg_privacy_plugin_replace_derivative_url($url, $params, $image) {
-	$url = pwg_privacy_modify_url($url, $image->id);
-	return $url;
+/**
+ * @param string $url
+ * @param mixed $params
+ * @param mixed $image
+ * @return string
+ */
+function pwg_privacy_plugin_replace_derivative_url($url, $params, $image)
+{
+    global $page;
+
+    $config = pwg_privacy_get_config();
+    $rootUrl = function_exists('get_root_url') ? (string) get_root_url() : './';
+    $imageId = is_object($image) && property_exists($image, 'id') ? $image->id : null;
+
+    if ($config->rewriteUrls) {
+        $url = PiwigoPrivacy\UrlRewriter::modifyUrl((string) $url, $imageId, $config, $rootUrl);
+    }
+
+    if (is_array($page) && ($page['section'] ?? '') === 'pshare' && !empty($page['pshare_key']) && is_string($page['pshare_key'])) {
+        $url = PiwigoPrivacy\UrlRewriter::appendPshareToken((string) $url, $page['pshare_key']);
+    }
+
+    return (string) $url;
 }
 
-function pwg_privacy_plugin_replace_url($url, $image) {
-	$url = pwg_privacy_modify_url($url, $image->id);
-	return $url;
-}
+/**
+ * @param string $url
+ * @param mixed $image
+ * @return string
+ */
+function pwg_privacy_plugin_replace_url($url, $image)
+{
+    $config = pwg_privacy_get_config();
+    $rootUrl = function_exists('get_root_url') ? (string) get_root_url() : './';
+    $imageId = is_object($image) && property_exists($image, 'id') ? $image->id : null;
 
-
-function pwg_privacy_modify_url($url, $id) {
-	global $conf;
-	$root_url = get_root_url();
-
-	if (strpos($url, 'action.php') !== false) {
-		//were not changing action.php urls
-		return $url;
-	}
-
-	if (!isset($conf['piwigo_privacy_redirect_header'])) {
-		$image_prefix = PHPWG_PLUGINS_PATH.basename(dirname(__FILE__)).'/get.php?img_id='.$id.'&file=';
-	} else {
-		$image_prefix = $id . '/';
-	}
-	if ($root_url && strpos($url, $root_url) === 0) {
-		$url = substr($url, strlen($root_url));
-		return trim($root_url, '/') . '/' . $image_prefix . trim($url, '/');
-	}
-	return $image_prefix . trim($url, '/');
+    return PiwigoPrivacy\UrlRewriter::modifyUrl((string) $url, $imageId, $config, $rootUrl);
 }

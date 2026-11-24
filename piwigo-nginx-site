@@ -1,80 +1,228 @@
+# Piwigo + piwigo_privacy (2026) — Production Nginx Server Configuration
+#
+# Key guarantees:
+# - Uses ^~ prefix locations on /upload/, /galleries/, /_data/i/ and /_pwg_priv/*
+#   so static regex caching rules (location ~* \.(jpg|png|webp|mp4)$) can NEVER
+#   bypass access control.
+# - Routes /i.php (and clean /i variants) through get.php for full Piwigo
+#   on-the-fly derivative generation (all derivative_url_style modes: 0, 1, 2).
+# - Hands authorized media back to Nginx via scoped internal aliases (/_pwg_priv/)
+#   for zero-copy HTTP/2 & HTTP/3 delivery, accurate MIME types, and 206 Ranges.
+# - Sets client_max_body_size 128m for Piwigo's chunked uploaders (default 2MB > Nginx 1MB default).
+# - Locks down /local/, /install/, /include/, /_data/logs/, dotfiles, while
+#   preserving /.well-known/acme-challenge/ for Let's Encrypt TLS renewals.
+#
+# Subfolder installs (e.g. https://example.com/piwigo/):
+#   Prefix the Piwigo locations below with /piwigo (e.g. location ^~ /piwigo/upload/,
+#   set $pwg_get '/piwigo/plugins/piwigo_privacy/get.php', location ^~ /_pwg_priv/...).
+#   The plugin automatically strips the subdirectory prefix from SCRIPT_NAME.
+
 server {
-	listen 127.0.0.1:80;
+	listen 80;
+	listen [::]:80;
+	# For production TLS + HTTP/2 (and HTTP/3 if supported by your Nginx build):
+	# listen 443 ssl;
+	# listen [::]:443 ssl;
+	# http2 on;
+	# ssl_certificate     /etc/letsencrypt/live/piwigo.example.com/fullchain.pem;
+	# ssl_certificate_key /etc/letsencrypt/live/piwigo.example.com/privkey.pem;
+
 	server_name piwigo.localhost;
 	root /var/www/piwigo;
 
-	index index.html index.htm index.php;
+	index index.php index.html index.htm;
+
+	# Piwigo's chunked web uploader defaults to 2MB chunks (exceeds Nginx 1MB default).
+	client_max_body_size 128m;
 
 	access_log /var/log/nginx/piwigo.access.log;
-	error_log /var/log/nginx/piwigo.error.log ;
+	error_log  /var/log/nginx/piwigo.error.log;
 
+	# Adjust to match your PHP 8.2+ FPM socket or TCP upstream (e.g. 127.0.0.1:9000).
+	set $php_fpm_upstream unix:/run/php-fpm/www.sock;
 
 	location / {
 		try_files $uri $uri/ =404;
 	}
 
-	#### Extra Security blocks not necessary for the plugin, just some added security ####
-	location ~  \.inc\.php$ {
-		deny all;
+	# Allow ACME HTTP-01 TLS certificate validation challenges.
+	location ^~ /.well-known/acme-challenge/ {
+		default_type "text/plain";
+		try_files $uri =404;
 	}
 
-	location ~  ^/(include|install|local|tools|admin/include|admin/themes|plugins|upload|themes|galleries|_data|doc|language|template-extension)/.*\.php$ {
-		deny all;
-	}
-
-	location ~ /\. {
+	# Block hidden files (.htaccess, .git, .env, editor swap files, etc.).
+	location ~ /\.(?!well-known/) {
 		access_log off;
 		log_not_found off;
 		deny all;
 	}
-	#### End of extra security block ####
 
-	location ~ \.php$ {
-		try_files  $uri =404;
-		fastcgi_pass unix:/run/php-fpm/www.sock;
-		fastcgi_index  index.php;
-		fastcgi_param  SCRIPT_FILENAME  $document_root$fastcgi_script_name;
-		fastcgi_param  SCRIPT_NAME  $fastcgi_script_name;
-		include fastcgi_params;
-	}
-
-	location ~ ^/\d+/ {
-		set $script '/plugins/piwigo_privacy/get.php';
-		fastcgi_pass unix:/run/php-fpm/www.sock;
-		fastcgi_index  get.php;
-		fastcgi_param  SCRIPT_FILENAME  $document_root$script;
-		fastcgi_param  SCRIPT_NAME      $script;
-		include fastcgi_params;
-	}
-
-	# explicitly allow piwigo_privacy get.php you don't need this rule in advance mode or if you are not
-	# using the extra security blocks which block all direct access to php files in plugins
-	location = /plugins/piwigo_privacy/get.php {
-		try_files  $uri =404;
-		fastcgi_pass unix:/run/php-fpm/www.sock;
-		fastcgi_index  index.php;
-		fastcgi_param  SCRIPT_FILENAME  $document_root$fastcgi_script_name;
-		fastcgi_param  SCRIPT_NAME  $fastcgi_script_name;
-		include fastcgi_params;
-	}
-
-	location = /i.php {
+	# ------------------------------------------------------------------
+	# Hardened Access Lockdown for Non-Public Core & Local Directories
+	# Blocks ALL file types (config backups, .sql, watermarks, logs, templates_c).
+	# ------------------------------------------------------------------
+	location ^~ /local/ {
 		deny all;
 	}
 
-	location /upload {
-		internal;
+	location ^~ /install/ {
+		deny all;
 	}
 
-	location /galleries {
-		internal;
+	location ^~ /include/ {
+		deny all;
 	}
 
-	location /_data {
-		internal;
+	location ^~ /tools/ {
+		deny all;
 	}
 
-	location /_data/combined {
-		try_files $uri $uri/ =404;
+	location ^~ /doc/ {
+		deny all;
+	}
+
+	location ^~ /template-extension/ {
+		deny all;
+	}
+
+	# Combined public CSS/JS assets MUST remain publicly readable.
+	location ^~ /_data/combined/ {
+		expires 30d;
+		add_header Cache-Control "public, max-age=2592000";
+		try_files $uri =404;
+	}
+
+	# Block private _data subdirectories (cache, logs, templates_c, tmp, updates).
+	# NOTE: /_data/i/ is matched separately below as a more specific ^~ prefix.
+	location ^~ /_data/ {
+		deny all;
+	}
+
+	# Prevent direct execution or download of internal *.inc.php and helper configs.
+	location ~* \.inc\.php$ {
+		deny all;
+	}
+
+	location ^~ /plugins/piwigo_privacy/include/ {
+		deny all;
+	}
+
+	location ^~ /plugins/piwigo_privacy/tests/ {
+		deny all;
+	}
+
+	location ~ ^/plugins/piwigo_privacy/(?!get\.php$|default\.png$) {
+		deny all;
+	}
+
+	location ~ ^/(plugins|themes|language|admin/include|admin/themes)/.*\.php$ {
+		deny all;
+	}
+
+	# ------------------------------------------------------------------
+	# Scoped Internal Aliases for X-Accel-Redirect Zero-Copy Delivery
+	# Only callable internally by get.php / action.php; immune to regex overrides (^~).
+	# Must stay aligned with $conf['piwigo_privacy_internal_prefix'] = '/_pwg_priv/'.
+	# ------------------------------------------------------------------
+	location ^~ /_pwg_priv/upload/ {
+		internal;
+		alias /var/www/piwigo/upload/;
+	}
+
+	location ^~ /_pwg_priv/galleries/ {
+		internal;
+		alias /var/www/piwigo/galleries/;
+	}
+
+	location ^~ /_pwg_priv/_data/i/ {
+		internal;
+		alias /var/www/piwigo/_data/i/;
+	}
+
+	location ^~ /_pwg_priv/themes/ {
+		internal;
+		alias /var/www/piwigo/themes/;
+	}
+
+	location ^~ /_pwg_priv/plugins/ {
+		internal;
+		alias /var/www/piwigo/plugins/;
+	}
+
+	# ------------------------------------------------------------------
+	# Transparent Privacy Gatekeeper (Canonical Media + i.php Derivatives)
+	# Notice ^~ halts regex matching so static-caching regex blocks cannot leak files.
+	# ------------------------------------------------------------------
+	location ^~ /upload/ {
+		include fastcgi_params;
+		fastcgi_param SCRIPT_FILENAME $document_root/plugins/piwigo_privacy/get.php;
+		fastcgi_param SCRIPT_NAME     /plugins/piwigo_privacy/get.php;
+		fastcgi_pass  $php_fpm_upstream;
+	}
+
+	location ^~ /galleries/ {
+		include fastcgi_params;
+		fastcgi_param SCRIPT_FILENAME $document_root/plugins/piwigo_privacy/get.php;
+		fastcgi_param SCRIPT_NAME     /plugins/piwigo_privacy/get.php;
+		fastcgi_pass  $php_fpm_upstream;
+	}
+
+	location ^~ /_data/i/ {
+		include fastcgi_params;
+		fastcgi_param SCRIPT_FILENAME $document_root/plugins/piwigo_privacy/get.php;
+		fastcgi_param SCRIPT_NAME     /plugins/piwigo_privacy/get.php;
+		fastcgi_pass  $php_fpm_upstream;
+	}
+
+	# Route ALL i.php / clean /i derivative URL forms through get.php access control:
+	# - /i.php?/upload/...-me.jpg
+	# - /i.php/upload/...-me.jpg
+	# - /i?/upload/...-me.jpg
+	# - /i/upload/...-me.jpg
+	location ~ ^/i(?:\.php)?(?:/|$) {
+		include fastcgi_params;
+		fastcgi_param SCRIPT_FILENAME $document_root/plugins/piwigo_privacy/get.php;
+		fastcgi_param SCRIPT_NAME     /plugins/piwigo_privacy/get.php;
+		fastcgi_pass  $php_fpm_upstream;
+	}
+
+	# Backwards-compatible legacy prefix URLs from piwigo_privacy v1.x (/<id>/upload/...).
+	location ~ ^/\d+/(?:upload|galleries|_data/i|i\.php|i)(?:/|$) {
+		include fastcgi_params;
+		fastcgi_param SCRIPT_FILENAME $document_root/plugins/piwigo_privacy/get.php;
+		fastcgi_param SCRIPT_NAME     /plugins/piwigo_privacy/get.php;
+		fastcgi_pass  $php_fpm_upstream;
+	}
+
+	# Explicit entrypoint for PHP fallback mode or direct health check.
+	location = /plugins/piwigo_privacy/get.php {
+		try_files $uri =404;
+		include fastcgi_params;
+		fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+		fastcgi_param SCRIPT_NAME     $fastcgi_script_name;
+		fastcgi_pass  $php_fpm_upstream;
+	}
+
+	# ------------------------------------------------------------------
+	# Optional Static Asset Caching for Public UI Files ONLY
+	# Safe because ^~ above protects /upload/, /galleries/, /_data/i/, and /_pwg_priv/.
+	# ------------------------------------------------------------------
+	location ~* \.(?:css|js|woff2?|ttf|eot|ico)$ {
+		expires 7d;
+		add_header Cache-Control "public, max-age=604800";
+		try_files $uri =404;
+	}
+
+	# Standard Piwigo PHP execution (supports clean URLs /index.php/category/...).
+	location ~ [^/]\.php(?:/|$) {
+		fastcgi_split_path_info ^(.+?\.php)(/.*)$;
+		try_files $fastcgi_script_name =404;
+		include fastcgi_params;
+		fastcgi_index index.php;
+		fastcgi_param PATH_INFO       $fastcgi_path_info;
+		fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+		fastcgi_param SCRIPT_NAME     $fastcgi_script_name;
+		fastcgi_pass  $php_fpm_upstream;
 	}
 }

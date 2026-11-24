@@ -1,0 +1,28 @@
+{
+  "name": "rmedranollamas/piwigo_privacy",
+  "description": "Privacy and access control plugin for Piwigo with Nginx X-Accel-Redirect, full i.php derivative parity, and Piwigo 16 support",
+  "type": "project",
+  "license": "GPL-2.0-or-later",
+  "require": {
+    "php": ">=8.2"
+  },
+  "require-dev": {
+    "phpstan/phpstan": "^2.1",
+    "nette/tester": "^2.5"
+  },
+  "autoload": {
+    "psr-4": {
+      "PiwigoPrivacy\\": "include/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "PiwigoPrivacy\\Tests\\": "tests/"
+    }
+  },
+  "scripts": {
+    "lint": "find . -maxdepth 3 -name '*.php' -not -path './vendor/*' -print0 | xargs -0 -n1 php -l",
+    "phpstan": "phpstan analyse --no-progress",
+    "test": "tester tests -C"
+  }
+}
