@@ -174,7 +174,8 @@ DerivativeGenerator::ensureGenerated(
 Assert::count(0, $GLOBALS['db_updates']);
 Assert::notContains('rotate', array_column(pwg_image::$ops, 0));
 
-// 6. Unchanged fallback ($changes === 0): image smaller than threshold with 0 rotation & 0 sharpen.
+// 6. ISM-4.2: When $changes === 0 but EXIF stripping is required (show_exif=false / < threshold),
+// strip() MUST execute and cache the stripped derivative instead of leaking the raw original!
 @unlink($root . '/_data/i/upload/2026/01/photo-3x.jpg');
 @unlink($root . '/_data/i/upload/2026/01/photo-me.jpg');
 pwg_image::$ops = [];
@@ -183,13 +184,91 @@ $tinyImgFactory = static fn (string $p): object => new class($p) extends pwg_ima
     public int $h = 80;
 };
 $parsedCuPhoto = DerivativeGenerator::parseRequestPath('./_data/i/upload/2026/01/photo-cu_s320x240.jpg', $cfg);
-$resCuNoop = DerivativeGenerator::ensureGenerated(
+$resCuStripped = DerivativeGenerator::ensureGenerated(
     $parsedCuPhoto,
     ['id' => 1, 'path' => './upload/2026/01/photo.jpg', 'width' => 100, 'height' => 80, 'rotation' => 0, 'coi' => null],
     $root . '/',
     $cfg,
     $tinyImgFactory
 );
+Assert::false($resCuStripped->unchangedFallback);
+Assert::true($resCuStripped->generatedNow);
+Assert::same('./_data/i/upload/2026/01/photo-cu_s320x240.jpg', $resCuStripped->relPath);
+Assert::contains('strip', array_column(pwg_image::$ops, 0));
+
+// When show_exif=true, stripMetadata=false, and dSize >= threshold with $changes === 0, unchangedFallback applies.
+@unlink($root . '/_data/i/upload/2026/01/photo-cu_s320x240.jpg');
+$keepExifCfg = Config::fromPiwigoConf([
+    'piwigo_privacy_mode' => 'nginx',
+    'show_exif' => true,
+    'derivatives_strip_metadata_threshold' => 1000,
+]);
+$medImgFactory = static fn (string $p): object => new class($p) extends pwg_image {
+    public int $w = 200;
+    public int $h = 150;
+};
+$resCuNoop = DerivativeGenerator::ensureGenerated(
+    $parsedCuPhoto,
+    ['id' => 1, 'path' => './upload/2026/01/photo.jpg', 'width' => 200, 'height' => 150, 'rotation' => 0, 'coi' => null],
+    $root . '/',
+    $keepExifCfg,
+    $medImgFactory
+);
 Assert::true($resCuNoop->unchangedFallback);
 Assert::false($resCuNoop->generatedNow);
 Assert::same('./upload/2026/01/photo.jpg', $resCuNoop->relPath);
+
+// 7. ISM-4.1: Anchored suffix replacement in trySwitchSource() prevents cross-image poisoning,
+// preserves parent folder names containing '-me', and enables IMG_CUSTOM cascading.
+$poisonSrc = $root . '/upload/2026/01/photo-me.jpg';
+file_put_contents($poisonSrc, str_repeat('M', 100));
+touch($poisonSrc, 1700000005);
+// Plant a cached '-la' derivative belonging to a DIFFERENT photo ('photo-la.jpg')!
+$otherCached = $root . '/_data/i/upload/2026/01/photo-la-la.jpg';
+file_put_contents($otherCached, 'PRIVATE_OTHER_PHOTO_BYTES');
+touch($otherCached, 1700000010);
+
+pwg_image::$ops = [];
+$parsedPoisonTarget = DerivativeGenerator::parseRequestPath('./_data/i/upload/2026/01/photo-me-me.jpg', $cfg);
+DerivativeGenerator::ensureGenerated(
+    $parsedPoisonTarget,
+    ['id' => 22, 'path' => './upload/2026/01/photo-me.jpg', 'width' => 4000, 'height' => 3000, 'rotation' => 0, 'coi' => null],
+    $root . '/',
+    $cfg
+);
+$openPoisonOps = array_values(array_filter(pwg_image::$ops, static fn (array $o): bool => $o[0] === 'open'));
+Assert::notContains('photo-la-la.jpg', $openPoisonOps[0][1]);
+Assert::contains('photo-me.jpg', $openPoisonOps[0][1]);
+
+// Folder containing '-me' and IMG_CUSTOM cascading from cached '-me':
+mkdir($root . '/upload/2026/test-me', 0755, true);
+mkdir($root . '/_data/i/upload/2026/test-me', 0755, true);
+$dirSrc = $root . '/upload/2026/test-me/shot.jpg';
+$dir3x = $root . '/_data/i/upload/2026/test-me/shot-3x.jpg';
+file_put_contents($dirSrc, str_repeat('S', 100));
+file_put_contents($dir3x, 'CACHED_3X');
+touch($dirSrc, 1700000005);
+touch($dir3x, 1700000010);
+
+pwg_image::$ops = [];
+$parsedDirMe = DerivativeGenerator::parseRequestPath('./_data/i/upload/2026/test-me/shot-me.jpg', $cfg);
+DerivativeGenerator::ensureGenerated(
+    $parsedDirMe,
+    ['id' => 23, 'path' => './upload/2026/test-me/shot.jpg', 'width' => 4000, 'height' => 3000, 'rotation' => 0, 'coi' => null],
+    $root . '/',
+    $cfg
+);
+$openDirOps = array_values(array_filter(pwg_image::$ops, static fn (array $o): bool => $o[0] === 'open'));
+Assert::contains('test-me/shot-3x.jpg', $openDirOps[0][1]);
+
+@unlink($dir3x);
+pwg_image::$ops = [];
+$parsedDirCu = DerivativeGenerator::parseRequestPath('./_data/i/upload/2026/test-me/shot-cu_s320x240.jpg', $cfg);
+DerivativeGenerator::ensureGenerated(
+    $parsedDirCu,
+    ['id' => 23, 'path' => './upload/2026/test-me/shot.jpg', 'width' => 4000, 'height' => 3000, 'rotation' => 0, 'coi' => null],
+    $root . '/',
+    $cfg
+);
+$openCuOps = array_values(array_filter(pwg_image::$ops, static fn (array $o): bool => $o[0] === 'open'));
+Assert::contains('test-me/shot-me.jpg', $openCuOps[0][1]);

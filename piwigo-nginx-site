@@ -104,6 +104,8 @@ server {
 		deny all;
 	}
 
+	# Note: if installed under a non-standard folder (e.g. piwigo_privacy-master),
+	# update /plugins/piwigo_privacy/ below to match the actual directory name.
 	location ^~ /plugins/piwigo_privacy/include/ {
 		deny all;
 	}
@@ -124,52 +126,57 @@ server {
 	# Scoped Internal Aliases for X-Accel-Redirect Zero-Copy Delivery
 	# Only callable internally by get.php / action.php; immune to regex overrides (^~).
 	# Must stay aligned with $conf['piwigo_privacy_internal_prefix'] = '/_pwg_priv/'.
-	# Nginx strips non-whitelisted upstream FastCGI headers (like nosniff/CORP) on
-	# X-Accel-Redirect, so security headers are re-asserted directly on these blocks.
+	# Nginx strips non-redirect upstream FastCGI headers on X-Accel-Redirect, so security
+	# headers, Vary, and CSP are forwarded here from $upstream_http_*.
 	# ------------------------------------------------------------------
 	location ^~ /_pwg_priv/upload/ {
 		internal;
 		alias /var/www/piwigo/upload/;
-		add_header X-Content-Type-Options "nosniff" always;
-		add_header Cross-Origin-Resource-Policy "same-origin" always;
-		add_header Referrer-Policy "same-origin" always;
-		add_header Vary "Cookie, X-PIWIGO-API" always;
+		add_header Vary $upstream_http_vary always;
+		add_header X-Content-Type-Options $upstream_http_x_content_type_options always;
+		add_header Cross-Origin-Resource-Policy $upstream_http_cross_origin_resource_policy always;
+		add_header Referrer-Policy $upstream_http_referrer_policy always;
+		add_header Content-Security-Policy $upstream_http_content_security_policy always;
 	}
 
 	location ^~ /_pwg_priv/galleries/ {
 		internal;
 		alias /var/www/piwigo/galleries/;
-		add_header X-Content-Type-Options "nosniff" always;
-		add_header Cross-Origin-Resource-Policy "same-origin" always;
-		add_header Referrer-Policy "same-origin" always;
-		add_header Vary "Cookie, X-PIWIGO-API" always;
+		add_header Vary $upstream_http_vary always;
+		add_header X-Content-Type-Options $upstream_http_x_content_type_options always;
+		add_header Cross-Origin-Resource-Policy $upstream_http_cross_origin_resource_policy always;
+		add_header Referrer-Policy $upstream_http_referrer_policy always;
+		add_header Content-Security-Policy $upstream_http_content_security_policy always;
 	}
 
 	location ^~ /_pwg_priv/_data/i/ {
 		internal;
 		alias /var/www/piwigo/_data/i/;
-		add_header X-Content-Type-Options "nosniff" always;
-		add_header Cross-Origin-Resource-Policy "same-origin" always;
-		add_header Referrer-Policy "same-origin" always;
-		add_header Vary "Cookie, X-PIWIGO-API" always;
+		add_header Vary $upstream_http_vary always;
+		add_header X-Content-Type-Options $upstream_http_x_content_type_options always;
+		add_header Cross-Origin-Resource-Policy $upstream_http_cross_origin_resource_policy always;
+		add_header Referrer-Policy $upstream_http_referrer_policy always;
+		add_header Content-Security-Policy $upstream_http_content_security_policy always;
 	}
 
 	location ^~ /_pwg_priv/themes/ {
 		internal;
 		alias /var/www/piwigo/themes/;
-		add_header X-Content-Type-Options "nosniff" always;
-		add_header Cross-Origin-Resource-Policy "same-origin" always;
-		add_header Referrer-Policy "same-origin" always;
-		add_header Vary "Cookie, X-PIWIGO-API" always;
+		add_header Vary $upstream_http_vary always;
+		add_header X-Content-Type-Options $upstream_http_x_content_type_options always;
+		add_header Cross-Origin-Resource-Policy $upstream_http_cross_origin_resource_policy always;
+		add_header Referrer-Policy $upstream_http_referrer_policy always;
+		add_header Content-Security-Policy $upstream_http_content_security_policy always;
 	}
 
 	location ^~ /_pwg_priv/plugins/ {
 		internal;
 		alias /var/www/piwigo/plugins/;
-		add_header X-Content-Type-Options "nosniff" always;
-		add_header Cross-Origin-Resource-Policy "same-origin" always;
-		add_header Referrer-Policy "same-origin" always;
-		add_header Vary "Cookie, X-PIWIGO-API" always;
+		add_header Vary $upstream_http_vary always;
+		add_header X-Content-Type-Options $upstream_http_x_content_type_options always;
+		add_header Cross-Origin-Resource-Policy $upstream_http_cross_origin_resource_policy always;
+		add_header Referrer-Policy $upstream_http_referrer_policy always;
+		add_header Content-Security-Policy $upstream_http_content_security_policy always;
 	}
 
 	# ------------------------------------------------------------------

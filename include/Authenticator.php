@@ -26,9 +26,10 @@ final class Authenticator
      * immediately so HTTP/2 concurrent thumbnail/video requests never serialize.
      *
      * @param array<string, mixed> $server
+     * @param array<string, mixed> $userRef Synchronized with authenticated global $user
      * @throws HttpException if an invalid X-PIWIGO-API header is supplied
      */
-    public static function authenticateAndReleaseLock(array $server): void
+    public static function authenticateAndReleaseLock(array $server, array &$userRef = []): void
     {
         global $user;
 
@@ -36,9 +37,9 @@ final class Authenticator
             ? trim($server['HTTP_X_PIWIGO_API'])
             : '';
 
-        if ($apiHeader !== '' && function_exists('is_a_guest') && is_a_guest()) {
+        if ($apiHeader !== '') {
             if (!function_exists('auth_key_login') || !function_exists('build_user')) {
-                self::releaseSessionLock();
+                self::releaseSessionLock(true);
                 throw new HttpException(401, 'API key authentication unavailable');
             }
 
@@ -48,7 +49,7 @@ final class Authenticator
 
             $authenticated = auth_key_login($escapedHeader, true);
             if (!$authenticated) {
-                self::releaseSessionLock();
+                self::releaseSessionLock(true);
                 throw new HttpException(401, 'Invalid api_key');
             }
 
@@ -57,15 +58,29 @@ final class Authenticator
             if (function_exists('trigger_notify')) {
                 trigger_notify('user_init', $user);
             }
+            if (func_num_args() >= 2) {
+                $userRef = $user;
+            }
+
+            self::releaseSessionLock(true);
+            return;
         }
 
-        self::releaseSessionLock();
+        self::releaseSessionLock(false);
     }
 
-    public static function releaseSessionLock(): void
+    public static function releaseSessionLock(bool $stateless = false): void
     {
         if (session_status() === PHP_SESSION_ACTIVE) {
-            @session_write_close();
+            if ($stateless) {
+                @session_abort();
+                $sessName = session_name();
+                if ($sessName !== false && !isset($_COOKIE[$sessName]) && !headers_sent() && function_exists('header_remove')) {
+                    @header_remove('Set-Cookie');
+                }
+            } else {
+                @session_write_close();
+            }
         }
     }
 }

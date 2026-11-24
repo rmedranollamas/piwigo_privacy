@@ -24,7 +24,7 @@ final class FrontController
         ?callable $imageFactory = null,
     ): void {
         try {
-            Authenticator::authenticateAndReleaseLock($server);
+            Authenticator::authenticateAndReleaseLock($server, $user);
 
             $parsedRequest = RequestParser::parse($server, $config);
             $media = AccessVerifier::verify($parsedRequest, $config, $user, $rootPath);
@@ -50,7 +50,13 @@ final class FrontController
                 AccessVerifier::assertDerivativeFallbackPermitted($media, $result);
 
                 if ($parsedRequest->ajaxload) {
-                    $relNoDot = ltrim($result->relPath, './');
+                    $relNoDot = $result->relPath;
+                    if (str_starts_with($relNoDot, './')) {
+                        $relNoDot = substr($relNoDot, 2);
+                    } elseif (str_starts_with($relNoDot, '../')) {
+                        $relNoDot = substr($relNoDot, 3);
+                    }
+                    $relNoDot = ltrim($relNoDot, '/');
                     $ajaxUrl = rtrim($absoluteRootUrl, '/') . '/' . $relNoDot;
                     if ($config->rewriteUrls && $media->elementInfo !== null && isset($media->elementInfo['id'])) {
                         $ajaxUrl = UrlRewriter::modifyUrl($ajaxUrl, (int) $media->elementInfo['id'], $config, $absoluteRootUrl);
@@ -66,11 +72,27 @@ final class FrontController
                 return;
             }
 
-            $responder->serveFile($media->serveRelPath, $rootPath, $config, $server, $parsedRequest->cacheBuster);
+            $allowedExts = $media->kind === ResolvedMedia::KIND_FORMAT
+                ? array_values(array_unique(array_merge($config->formatExt, $config->fileExt)))
+                : null;
+
+            $responder->serveFile(
+                $media->serveRelPath,
+                $rootPath,
+                $config,
+                $server,
+                $parsedRequest->cacheBuster,
+                $allowedExts
+            );
         } catch (HttpException $e) {
             Authenticator::releaseSessionLock();
             self::logDenial($e, $server, $config);
             $responder->sendError($e, $config, $absoluteRootUrl);
+        } catch (\Throwable $e) {
+            Authenticator::releaseSessionLock();
+            $internal = new HttpException(500, 'Internal error: ' . $e->getMessage());
+            self::logDenial($internal, $server, $config);
+            $responder->sendError(new HttpException(500, 'Internal Server Error'), $config, $absoluteRootUrl);
         }
     }
 

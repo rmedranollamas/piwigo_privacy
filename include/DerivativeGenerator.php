@@ -173,72 +173,14 @@ final class DerivativeGenerator
             return new DerivativeResult($parsed->derivativeRelPath, generatedNow: false);
         }
 
-        // Resolve original dimensions & rotation angle.
-        $originalSize = null;
-        if ($elementInfo !== null && !$parsed->isRepresentativeSource
-            && isset($elementInfo['width'], $elementInfo['height'])
-            && is_numeric($elementInfo['width']) && is_numeric($elementInfo['height'])
-        ) {
-            $originalSize = [(int) $elementInfo['width'], (int) $elementInfo['height']];
-        } elseif ($imageInfo = @getimagesize($srcFullPath)) {
-            $originalSize = [(int) $imageInfo[0], (int) $imageInfo[1]];
-        }
-
-        $coi = ($elementInfo !== null && !$parsed->isRepresentativeSource && isset($elementInfo['coi']) && is_string($elementInfo['coi']) && $elementInfo['coi'] !== '')
-            ? $elementInfo['coi']
-            : null;
-
-        if ($parsed->isRepresentativeSource || $parsed->isThemeOrPluginSource || $elementInfo === null) {
-            // Piwigo core i.php:472-520: never apply original photo rotation metadata or write images.rotation
-            // for FFmpeg/VideoJS pwg_representative posters or theme/plugin icons.
-            $rotationAngle = 0;
-        } elseif (isset($elementInfo['rotation']) && is_numeric($elementInfo['rotation'])) {
-            $rotationAngle = (int) pwg_image::get_rotation_angle_from_code((string) $elementInfo['rotation']);
-        } else {
-            $detected = pwg_image::get_rotation_angle($srcFullPath);
-            $rotationAngle = is_numeric($detected) ? (int) $detected : 0;
-            if (isset($elementInfo['id']) && function_exists('single_update') && defined('IMAGES_TABLE')) {
-                single_update(
-                    IMAGES_TABLE,
-                    ['rotation' => pwg_image::get_rotation_code_from_angle($rotationAngle)],
-                    ['id' => (int) $elementInfo['id']]
-                );
-            }
-        }
-
-        // Attempt try_switch_source() cascade from a cached larger derivative.
-        $activeSrcRelPath = $srcRelPath;
-        $activeSrcFullPath = $srcFullPath;
-        $switched = self::trySwitchSource(
-            $params,
-            $derivFullPath,
-            $parsed->derivativeRelPath,
-            $srcMtime,
-            $originalSize,
-            $rotationAngle
-        );
-        if ($switched !== null) {
-            $activeSrcRelPath = $switched['relPath'];
-            $activeSrcFullPath = $switched['fullPath'];
-            $rotationAngle = 0;
-        } elseif ($params->type === IMG_CUSTOM) {
-            $sharpenSum = 0.0;
-            $typeMap = ImageStdParams::get_defined_type_map();
-            if (count($typeMap) > 0) {
-                foreach ($typeMap as $stdParams) {
-                    $sharpenSum += (float) $stdParams->sharpen;
-                }
-                $params->sharpen = round($sharpenSum / count($typeMap));
-            }
-        }
-
-        // Acquire per-derivative advisory lock to prevent stampedes and half-written JPEGs.
+        // Acquire bounded advisory lock to prevent stampedes, TOCTOU races, and half-written JPEGs.
         $tmpDir = rtrim($rootPath, '/') . '/' . trim($config->dataLocation, '/') . '/tmp';
         if (!self::ensureDir($tmpDir)) {
             throw new HttpException(500, 'Could not create derivative temp directory');
         }
 
-        $lockPath = $tmpDir . '/pwg_priv_' . sha1($parsed->derivativeRelPath) . '.lock';
+        $lockBucket = substr(sha1($parsed->derivativeRelPath), 0, 3);
+        $lockPath = $tmpDir . '/pwg_priv_' . $lockBucket . '.lock';
         $lockFp = @fopen($lockPath, 'c+b');
         if ($lockFp === false) {
             throw new HttpException(500, 'Could not open derivative lock file');
@@ -249,7 +191,9 @@ final class DerivativeGenerator
         $wmImage = null;
 
         try {
-            @flock($lockFp, LOCK_EX);
+            if (!@flock($lockFp, LOCK_EX)) {
+                throw new HttpException(500, 'Could not acquire derivative lock');
+            }
             clearstatcache(true, $derivFullPath);
             $derivMtimeLocked = @filemtime($derivFullPath);
             if ($derivMtimeLocked !== false
@@ -264,19 +208,90 @@ final class DerivativeGenerator
                 throw new HttpException(500, 'Could not create derivative cache directory');
             }
 
+            // Resolve original dimensions & rotation angle under lock to avoid duplicate DB writes.
+            $originalSize = null;
+            if ($elementInfo !== null && !$parsed->isRepresentativeSource
+                && isset($elementInfo['width'], $elementInfo['height'])
+                && is_numeric($elementInfo['width']) && is_numeric($elementInfo['height'])
+            ) {
+                $originalSize = [(int) $elementInfo['width'], (int) $elementInfo['height']];
+            } elseif ($imageInfo = @getimagesize($srcFullPath)) {
+                $originalSize = [(int) $imageInfo[0], (int) $imageInfo[1]];
+            }
+
+            $coi = ($elementInfo !== null && !$parsed->isRepresentativeSource && isset($elementInfo['coi']) && is_string($elementInfo['coi']) && $elementInfo['coi'] !== '')
+                ? $elementInfo['coi']
+                : null;
+
+            if ($parsed->isRepresentativeSource || $parsed->isThemeOrPluginSource || $elementInfo === null) {
+                // Piwigo core i.php:472-520: never apply original photo rotation metadata or write images.rotation
+                // for FFmpeg/VideoJS pwg_representative posters or theme/plugin icons.
+                $rotationAngle = 0;
+            } elseif (isset($elementInfo['rotation']) && is_numeric($elementInfo['rotation'])) {
+                $rotationAngle = (int) pwg_image::get_rotation_angle_from_code((string) $elementInfo['rotation']);
+            } else {
+                $detected = pwg_image::get_rotation_angle($srcFullPath);
+                $rotationAngle = is_numeric($detected) ? (int) $detected : 0;
+                if (isset($elementInfo['id']) && function_exists('single_update') && defined('IMAGES_TABLE')) {
+                    single_update(
+                        IMAGES_TABLE,
+                        ['rotation' => pwg_image::get_rotation_code_from_angle($rotationAngle)],
+                        ['id' => (int) $elementInfo['id']]
+                    );
+                }
+            }
+
+            // Attempt try_switch_source() cascade from a cached larger derivative under lock.
+            $activeSrcRelPath = $srcRelPath;
+            $activeSrcFullPath = $srcFullPath;
+            $activeRotationAngle = $rotationAngle;
+            $switched = self::trySwitchSource(
+                $params,
+                $derivFullPath,
+                $parsed->derivativeRelPath,
+                $parsed->postfix,
+                $parsed->ext,
+                $srcMtime,
+                $originalSize,
+                $rotationAngle
+            );
+            if ($switched !== null) {
+                $activeSrcRelPath = $switched['relPath'];
+                $activeSrcFullPath = $switched['fullPath'];
+                $activeRotationAngle = 0;
+            } elseif ($params->type === IMG_CUSTOM) {
+                self::applyCustomSharpen($params);
+            }
+
             if (PHP_SAPI !== 'cli') {
                 ignore_user_abort(true);
                 @set_time_limit(0);
             }
 
             $factory = $imageFactory ?? static fn (string $path): object => new pwg_image($path);
-            /** @var pwg_image $image */
-            $image = $factory($activeSrcFullPath);
+            try {
+                /** @var pwg_image $image */
+                $image = $factory($activeSrcFullPath);
+            } catch (\Throwable $e) {
+                if ($switched === null) {
+                    throw $e;
+                }
+                // Fallback cleanly to original source if intermediate cached derivative vanished.
+                $params = clone $parsed->params;
+                $activeSrcRelPath = $srcRelPath;
+                $activeSrcFullPath = $srcFullPath;
+                $activeRotationAngle = $rotationAngle;
+                if ($params->type === IMG_CUSTOM) {
+                    self::applyCustomSharpen($params);
+                }
+                /** @var pwg_image $image */
+                $image = $factory($activeSrcFullPath);
+            }
 
             $changes = 0;
 
-            if ($rotationAngle !== 0) {
-                $image->rotate($rotationAngle);
+            if ($activeRotationAngle !== 0) {
+                $image->rotate($activeRotationAngle);
                 $changes++;
             }
 
@@ -347,16 +362,17 @@ final class DerivativeGenerator
                 $wmImage = null;
             }
 
-            if ($changes === 0) {
+            $needsStrip = ($dSize[0] * $dSize[1] < $config->stripMetadataThreshold)
+                || !$config->showExif
+                || $config->stripMetadata;
+
+            if ($changes === 0 && !$needsStrip) {
                 self::safeDestroy($image);
                 $image = null;
                 return new DerivativeResult($activeSrcRelPath, generatedNow: false, unchangedFallback: true);
             }
 
-            if (($dSize[0] * $dSize[1] < $config->stripMetadataThreshold)
-                || !$config->showExif
-                || $config->stripMetadata
-            ) {
+            if ($needsStrip) {
                 $image->strip();
             }
 
@@ -397,6 +413,18 @@ final class DerivativeGenerator
         }
     }
 
+    private static function applyCustomSharpen(DerivativeParams $params): void
+    {
+        $sharpenSum = 0.0;
+        $typeMap = ImageStdParams::get_defined_type_map();
+        if (count($typeMap) > 0) {
+            foreach ($typeMap as $stdParams) {
+                $sharpenSum += (float) $stdParams->sharpen;
+            }
+            $params->sharpen = round($sharpenSum / count($typeMap));
+        }
+    }
+
     /**
      * Port of Piwigo 16 i.php try_switch_source() so smaller derivatives cascade from cached larger ones.
      *
@@ -407,6 +435,8 @@ final class DerivativeGenerator
         DerivativeParams $params,
         string $derivFullPath,
         string $derivRelPath,
+        string $postfix,
+        string $ext,
         int $originalMtime,
         ?array $originalSize,
         int $rotationAngle,
@@ -414,6 +444,13 @@ final class DerivativeGenerator
         if ($originalSize === null) {
             return null;
         }
+
+        $currentSuffix = '-' . $postfix . $ext;
+        if (!str_ends_with($derivFullPath, $currentSuffix) || !str_ends_with($derivRelPath, $currentSuffix)) {
+            return null;
+        }
+        $baseFullPath = substr($derivFullPath, 0, -strlen($currentSuffix));
+        $baseRelPath = substr($derivRelPath, 0, -strlen($currentSuffix));
 
         if ($rotationAngle === 90 || $rotationAngle === 270) {
             $originalSize = [$originalSize[1], $originalSize[0]];
@@ -461,10 +498,9 @@ final class DerivativeGenerator
             $candidates[] = $candidate;
         }
 
-        $targetToken = '-' . derivative_to_url($params->type);
         foreach (array_reverse($candidates) as $candidate) {
-            $candToken = '-' . derivative_to_url($candidate->type);
-            $candFullPath = str_replace($targetToken, $candToken, $derivFullPath);
+            $candSuffix = '-' . derivative_to_url($candidate->type) . $ext;
+            $candFullPath = $baseFullPath . $candSuffix;
             $candMtime = @filemtime($candFullPath);
             if ($candMtime === false
                 || $candMtime < $originalMtime
@@ -473,7 +509,7 @@ final class DerivativeGenerator
             ) {
                 continue;
             }
-            $candRelPath = str_replace($targetToken, $candToken, $derivRelPath);
+            $candRelPath = $baseRelPath . $candSuffix;
             $params->use_watermark = false;
             $params->sharpen = min(1, $params->sharpen);
             return [

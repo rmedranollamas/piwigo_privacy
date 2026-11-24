@@ -166,3 +166,43 @@ $r403 = new FakeResponse();
 $r403->createResponder()->sendError(new HttpException(403, 'Forbidden'), $phpCfg, 'https://example.com/');
 Assert::same(403, $r403->status);
 Assert::false($r403->hasHeaderPrefix('WWW-Authenticate:'));
+
+// 10. ISM-2.2: Missing files in both Nginx and PHP modes throw 404 WITHOUT staging max-age=300 or CSP headers.
+$rMissingNginx = new FakeResponse();
+Assert::exception(
+    static fn () => $rMissingNginx->createResponder()->serveFile('./upload/2026/nonexistent.svg', $root . '/', $nginxCfg, [], false),
+    HttpException::class,
+    null,
+    404
+);
+Assert::same([], $rMissingNginx->headers);
+
+$rMissingPhp = new FakeResponse();
+Assert::exception(
+    static fn () => $rMissingPhp->createResponder()->serveFile('./upload/2026/nonexistent.svg', $root . '/', $phpCfg, [], false),
+    HttpException::class,
+    null,
+    404
+);
+Assert::same([], $rMissingPhp->headers);
+
+// 11. ISM-5.1: KIND_FORMAT sidecars (e.g. .dng) succeed when format_ext allowlist is passed.
+$fmtDir = $root . '/upload/2026/pwg_format';
+mkdir($fmtDir, 0755, true);
+$dngPath = $fmtDir . '/raw.dng';
+file_put_contents($dngPath, 'RAW_DNG_BYTES');
+register_shutdown_function(static function () use ($dngPath, $fmtDir): void {
+    @unlink($dngPath);
+    @rmdir($fmtDir);
+});
+$rFmt = new FakeResponse();
+$rFmt->createResponder()->serveFile(
+    './upload/2026/pwg_format/raw.dng',
+    $root . '/',
+    $phpCfg,
+    ['REQUEST_METHOD' => 'GET'],
+    false,
+    $phpCfg->formatExt
+);
+Assert::same(200, $rFmt->status);
+Assert::same('RAW_DNG_BYTES', $rFmt->body);

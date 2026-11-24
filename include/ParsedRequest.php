@@ -15,7 +15,6 @@ final class ParsedRequest
         public readonly bool $ajaxload,
         public readonly bool $cacheBuster,
         public readonly ?string $pshareKey,
-        public readonly bool $isExternalParentPath = false,
     ) {
     }
 }

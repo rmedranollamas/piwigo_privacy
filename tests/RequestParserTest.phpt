@@ -140,3 +140,47 @@ Assert::exception(
     null,
     400
 );
+
+// ISM-3.3: Legacy /<id>/i?... route works cleanly after query split.
+$rLegacyIQuery = RequestParser::parse(['REQUEST_URI' => '/42/i?/upload/2026/img-me.jpg&b=99'], $nginxCfg);
+Assert::same(42, $rLegacyIQuery->imgId);
+Assert::same('./_data/i/upload/2026/img-me.jpg', $rLegacyIQuery->normalizedPath);
+Assert::true($rLegacyIQuery->isDerivativeRequest);
+Assert::true($rLegacyIQuery->cacheBuster);
+
+// ISM-3.2: Standalone PHP file= round-trip with ./_data/i, %20 whitespaces, inner ?b=, and i.php?%20.
+$rPhpDotDeriv = RequestParser::parse([
+    'REQUEST_URI' => '/plugins/piwigo_privacy/get.php?img_id=42&file=.%2F_data%2Fi%2Fupload%2F2026%2Fimg-me.jpg',
+], $phpCfg);
+Assert::same('./_data/i/upload/2026/img-me.jpg', $rPhpDotDeriv->normalizedPath);
+Assert::true($rPhpDotDeriv->isDerivativeRequest);
+
+$rPhpBusterDeriv = RequestParser::parse([
+    'REQUEST_URI' => '/plugins/piwigo_privacy/get.php?img_id=42&file=_data%2Fi%2Fupload%2F2026%2Fimg-me.jpg%3Fb%3D123',
+], $phpCfg);
+Assert::same('./_data/i/upload/2026/img-me.jpg', $rPhpBusterDeriv->normalizedPath);
+Assert::true($rPhpBusterDeriv->isDerivativeRequest);
+Assert::true($rPhpBusterDeriv->cacheBuster);
+
+$wsPhpCfg = Config::fromPiwigoConf(['piwigo_privacy_allow_whitespaces' => true]);
+$rPhpWs = RequestParser::parse([
+    'REQUEST_URI' => '/plugins/piwigo_privacy/get.php?img_id=42&file=galleries%2Fvacances%2Fmy%2520photo.jpg',
+], $wsPhpCfg);
+Assert::same('./galleries/vacances/my photo.jpg', $rPhpWs->normalizedPath);
+
+$rPhpIWs = RequestParser::parse([
+    'REQUEST_URI' => '/plugins/piwigo_privacy/get.php?img_id=42&file=i.php%3F%2Fupload%2F2026%2Fmy%2520photo-sm.jpg&ajaxload=true',
+], $wsPhpCfg);
+Assert::same('./_data/i/upload/2026/my photo-sm.jpg', $rPhpIWs->normalizedPath);
+Assert::true($rPhpIWs->isDerivativeRequest);
+Assert::true($rPhpIWs->ajaxload);
+
+// Double-encoded traversal in file= MUST still be rejected with 400!
+Assert::exception(
+    static fn () => RequestParser::parse([
+        'REQUEST_URI' => '/plugins/piwigo_privacy/get.php?img_id=42&file=..%252F..%252Flocal%252Fsecret.php',
+    ], $phpCfg),
+    HttpException::class,
+    null,
+    400
+);
