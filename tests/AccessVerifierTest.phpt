@@ -18,12 +18,13 @@ define('CATEGORIES_TABLE', 'piwigo_categories');
 define('IMAGE_CATEGORY_TABLE', 'piwigo_image_category');
 define('IMAGE_FORMAT_TABLE', 'piwigo_image_format');
 define('PSHARE_KEYS_TABLE', 'piwigo_pshare_keys');
-define('ACCESS_GUEST', 0);
+define('ACCESS_GUEST', 1);
 
 $conf = [
     'picture_ext' => ['jpg', 'jpeg', 'png', 'gif', 'webp'],
     'file_ext' => ['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'tif', 'pdf', 'svg'],
     'enable_formats' => true,
+    'upload_dir' => '../upload',
 ];
 
 final class SrcImage
@@ -78,7 +79,8 @@ class MockDbResult
 $GLOBALS['mock_state'] = [
     'is_admin' => false,
     'is_guest' => true,
-    'user' => ['id' => 2, 'level' => 0, 'enabled_high' => 'false', 'forbidden_categories' => '10'],
+    'guest_access' => true,
+    'user' => ['id' => 2, 'level' => 0, 'enabled_high' => 'false', 'forbidden_categories' => '10', 'image_access_list' => ''],
     'images' => [
         101 => ['id' => 101, 'path' => './galleries/pub/README', 'level' => 0, 'width' => 100, 'height' => 100, 'representative_ext' => 'txt'],
         102 => ['id' => 102, 'path' => './galleries/priv/secret.jpg', 'level' => 0, 'width' => 4000, 'height' => 3000, 'representative_ext' => null],
@@ -88,6 +90,9 @@ $GLOBALS['mock_state'] = [
         106 => ['id' => 106, 'path' => './upload/2026/11/lounge_orphan.jpg', 'level' => 0, 'width' => 4000, 'height' => 3000, 'representative_ext' => null],
         107 => ['id' => 107, 'path' => './upload/2026/11/small_ok.jpg', 'level' => 0, 'width' => 800, 'height' => 600, 'representative_ext' => null],
         108 => ['id' => 108, 'path' => './upload/2026/11/photo_lvl4.jpg', 'level' => 4, 'width' => 1200, 'height' => 800, 'representative_ext' => null],
+        109 => ['id' => 109, 'path' => './upload/2026/11/clip.tif', 'level' => 0, 'width' => 5000, 'height' => 4000, 'representative_ext' => 'jpg'],
+        110 => ['id' => 110, 'path' => './upload/2026/11/clip.mp4', 'level' => 0, 'width' => 1920, 'height' => 1080, 'representative_ext' => 'jpg'],
+        111 => ['id' => 111, 'path' => '../upload/2026/11/parent_photo.jpg', 'level' => 0, 'width' => 800, 'height' => 600, 'representative_ext' => null],
     ],
     'image_cats' => [
         101 => [1],
@@ -98,17 +103,29 @@ $GLOBALS['mock_state'] = [
         // 106 intentionally has ZERO rows (lounge / orphan!)
         107 => [1],
         108 => [1],
+        109 => [10], // forbidden category 10 (precedes 110 in DB)
+        110 => [1],
+        111 => [1],
     ],
     'formats' => [
         107 => [['format_id' => 9, 'image_id' => 107, 'ext' => 'dng']],
+        111 => [['format_id' => 10, 'image_id' => 111, 'ext' => 'dng']],
     ],
     'pshares' => [
         str_repeat('ShareKey12', 3) => ['image_id' => 102, 'expired' => false],
         str_repeat('OldKey1234', 3) => ['image_id' => 102, 'expired' => true],
+        str_repeat('TiffShare1', 3) => ['image_id' => 105, 'expired' => false],
     ],
 ];
 
-function check_status(int $level): void {}
+function check_status(int $level): void { throw new RuntimeException('check_status must not be called in AccessVerifier!'); }
+function is_autorize_status(int $accessType): bool
+{
+    if ($accessType >= ACCESS_GUEST && $GLOBALS['mock_state']['is_guest']) {
+        return (bool) $GLOBALS['mock_state']['guest_access'];
+    }
+    return true;
+}
 function is_admin(): bool { return (bool) $GLOBALS['mock_state']['is_admin']; }
 function is_a_guest(): bool { return (bool) $GLOBALS['mock_state']['is_guest']; }
 function pwg_db_real_escape_string(string $s): string { return addslashes($s); }
@@ -119,8 +136,8 @@ function get_sql_condition_FandF(array $fields, ?string $prefix = null): string
     if (!empty($user['forbidden_categories']) && isset($fields['forbidden_categories'])) {
         $parts[] = $fields['forbidden_categories'] . ' NOT IN (' . $user['forbidden_categories'] . ')';
     }
-    if (isset($fields['forbidden_images']) && $fields['forbidden_images'] === 'i.id') {
-        $parts[] = 'i.level <= ' . (int) $user['level'];
+    if (isset($fields['forbidden_images']) && $fields['forbidden_images'] === 'ic.image_id' && !empty($user['image_access_list'])) {
+        $parts[] = 'ic.image_id NOT IN (' . $user['image_access_list'] . ')';
     }
     return $parts === [] ? '' : ($prefix ?? '') . ' (' . implode(' AND ', $parts) . ')';
 }
@@ -180,6 +197,12 @@ function pwg_query(string $sql): MockDbResult
             return new MockDbResult([]);
         }
         $forbidden = array_map('intval', explode(',', (string) $st['user']['forbidden_categories']));
+        $forbiddenImages = $st['user']['image_access_list'] !== ''
+            ? array_map('intval', explode(',', (string) $st['user']['image_access_list']))
+            : [];
+        if (in_array($imgId, $forbiddenImages, true)) {
+            return new MockDbResult([]);
+        }
         $cats = $st['image_cats'][$imgId] ?? [];
         if ($row['level'] > $st['user']['level']) {
             return new MockDbResult([]);
@@ -432,3 +455,112 @@ Assert::exception(
     null,
     403
 );
+
+// ISM-1.2: guest_access=false blocks regular level=0 guest access with 401 (no check_status exit!),
+// while STILL allowing login-page theme derivatives AND valid ?pshare= links!
+$GLOBALS['mock_state']['guest_access'] = false;
+$GLOBALS['mock_state']['is_guest'] = true;
+$GLOBALS['mock_state']['is_admin'] = false;
+$privCfg = Config::fromPiwigoConf(array_merge($conf, ['guest_access' => false]));
+
+Assert::exception(
+    static fn () => AccessVerifier::verify(
+        RequestParser::parse(['REQUEST_URI' => '/upload/2026/11/small_ok.jpg'], $privCfg),
+        $privCfg,
+        $GLOBALS['mock_state']['user'],
+        $tmpRoot
+    ),
+    HttpException::class,
+    null,
+    401
+);
+
+$themeOnPriv = AccessVerifier::verify(
+    RequestParser::parse(['REQUEST_URI' => '/_data/i/themes/modus/icon-sq.png'], $privCfg),
+    $privCfg,
+    $GLOBALS['mock_state']['user'],
+    $tmpRoot
+);
+Assert::same(ResolvedMedia::KIND_DERIVATIVE_THEME, $themeOnPriv->kind);
+
+$pshareOnPriv = AccessVerifier::verify(
+    RequestParser::parse([
+        'REQUEST_URI' => '/i.php?/galleries/priv/secret-me.jpg&pshare=' . str_repeat('ShareKey12', 3),
+    ], $privCfg),
+    $privCfg,
+    $GLOBALS['mock_state']['user'],
+    $tmpRoot
+);
+Assert::true($pshareOnPriv->grantedViaPshare);
+
+$GLOBALS['mock_state']['guest_access'] = true;
+
+// ISM-4.3: Representative fallback protection blocks unchangedFallback on 5000x4000 TIFF representative!
+$repParsed = DerivativeGenerator::parseRequestPath('./_data/i/upload/2026/11/pwg_representative/scan-me.png', $cfg);
+$repFallbackMedia = new ResolvedMedia(
+    kind: ResolvedMedia::KIND_DERIVATIVE,
+    serveRelPath: './_data/i/upload/2026/11/pwg_representative/scan-me.png',
+    elementInfo: $GLOBALS['mock_state']['images'][105], // scan.tif 5000x4000
+    parsedDerivative: $repParsed,
+    enabledHigh: false,
+);
+Assert::exception(
+    static fn () => AccessVerifier::assertDerivativeFallbackPermitted(
+        $repFallbackMedia,
+        new DerivativeResult('./upload/2026/11/pwg_representative/scan.png', false, unchangedFallback: true)
+    ),
+    HttpException::class,
+    null,
+    401
+);
+
+// ISM-4.3: Direct pwg_representative/scan.png with pshare on 5000x4000 TIFF blocked (> IMG_MEDIUM).
+Assert::exception(
+    static fn () => AccessVerifier::verify(
+        RequestParser::parse([
+            'REQUEST_URI' => '/upload/2026/11/pwg_representative/scan.png?pshare=' . str_repeat('TiffShare1', 3),
+        ], $cfg),
+        $cfg,
+        $GLOBALS['mock_state']['user'],
+        $tmpRoot
+    ),
+    HttpException::class,
+    null,
+    401
+);
+
+// ISM-5.4: Same-stem sibling collision (forbidden clip.tif before public clip.mp4) still authorizes clip.mp4!
+$clipRes = AccessVerifier::verify(
+    RequestParser::parse(['REQUEST_URI' => '/upload/2026/11/pwg_representative/clip.jpg'], $cfg),
+    $cfg,
+    $GLOBALS['mock_state']['user'],
+    $tmpRoot
+);
+Assert::same(110, (int) $clipRes->elementInfo['id']);
+
+// ISM-5.4: Per-image image_access_list ACLs enforced via ic.image_id.
+$GLOBALS['mock_state']['is_guest'] = false;
+$GLOBALS['mock_state']['user']['id'] = 5;
+$GLOBALS['mock_state']['user']['image_access_list'] = '107';
+Assert::exception(
+    static fn () => AccessVerifier::verify(
+        RequestParser::parse(['REQUEST_URI' => '/upload/2026/11/small_ok.jpg'], $cfg),
+        $cfg,
+        $GLOBALS['mock_state']['user'],
+        $tmpRoot
+    ),
+    HttpException::class,
+    null,
+    403
+);
+$GLOBALS['mock_state']['user']['image_access_list'] = '';
+
+// ISM-5.3: Parent ../upload/2026/11/pwg_format/parent_photo.dng resolves and preserves '../' prefix!
+$GLOBALS['mock_state']['user']['enabled_high'] = 'true';
+$parentFmt = AccessVerifier::verify(
+    RequestParser::parse(['REQUEST_URI' => '/upload/2026/11/pwg_format/parent_photo.dng'], $cfg),
+    $cfg,
+    $GLOBALS['mock_state']['user'],
+    $tmpRoot
+);
+Assert::same('../upload/2026/11/pwg_format/parent_photo.dng', $parentFmt->serveRelPath);

@@ -103,6 +103,7 @@ final class MediaResponder
      * Serves an authorized local file via X-Accel-Redirect (Nginx mode) or streaming PHP.
      *
      * @param array<string, mixed> $server
+     * @param string[]|null $allowedExtensions Override allowed extension list (e.g. format_ext for KIND_FORMAT)
      * @throws HttpException
      */
     public function serveFile(
@@ -111,18 +112,23 @@ final class MediaResponder
         Config $config,
         array $server,
         bool $cacheBuster = false,
+        ?array $allowedExtensions = null,
     ): void {
         $ext = strtolower(pathinfo($relPath, PATHINFO_EXTENSION));
-        if ($ext === '' || !in_array($ext, $config->fileExt, true)) {
+        $allowedExts = $allowedExtensions ?? $config->fileExt;
+        if ($ext === '' || !in_array($ext, $allowedExts, true)) {
             throw new HttpException(403, 'File extension is not allowed');
         }
 
-        $this->emitSecurityAndCacheHeaders($config, $ext, $cacheBuster);
-
+        $fullPath = self::resolveDiskPath($rootPath, $relPath);
         $mime = self::guessMimeType($ext, $config);
-        ($this->headerEmitter)('Content-Type: ' . $mime);
 
         if ($config->mode === Config::MODE_NGINX && $config->redirectHeader !== null) {
+            if (!@is_file($fullPath) || !@is_readable($fullPath)) {
+                throw new HttpException(404, 'Media file not found');
+            }
+            $this->emitSecurityAndCacheHeaders($config, $ext, $cacheBuster);
+            ($this->headerEmitter)('Content-Type: ' . $mime);
             if (in_array($ext, ['svg', 'svgz', 'html', 'htm', 'xml'], true)) {
                 $safeName = preg_replace('/[^\x20-\x7E]/', '_', str_replace(['"', '\\', "\r", "\n"], '_', basename($relPath)));
                 ($this->headerEmitter)('Content-Disposition: attachment; filename="' . $safeName . '"');
@@ -132,7 +138,6 @@ final class MediaResponder
             return;
         }
 
-        $fullPath = self::resolveDiskPath($rootPath, $relPath);
         $fp = @fopen($fullPath, 'rb');
         if ($fp === false) {
             throw new HttpException(404, 'Media file not found');
@@ -149,6 +154,7 @@ final class MediaResponder
             $lastModified = gmdate('D, d M Y H:i:s', $mtime) . ' GMT';
             $etag = sprintf('"%x-%x"', $mtime, $size);
 
+            $this->emitSecurityAndCacheHeaders($config, $ext, $cacheBuster);
             ($this->headerEmitter)('Last-Modified: ' . $lastModified);
             ($this->headerEmitter)('ETag: ' . $etag);
 
@@ -156,6 +162,8 @@ final class MediaResponder
                 ($this->statusEmitter)(304);
                 return;
             }
+
+            ($this->headerEmitter)('Content-Type: ' . $mime);
 
             $rangeSupported = in_array($ext, self::RANGE_EXTS, true);
             $method = strtoupper(isset($server['REQUEST_METHOD']) && is_string($server['REQUEST_METHOD'])

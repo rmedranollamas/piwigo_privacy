@@ -87,13 +87,18 @@ final class RequestParser
             }
 
             $fileParam = $queryParams['file'];
+            while (str_starts_with($fileParam, './')) {
+                $fileParam = substr($fileParam, 2);
+            }
+            $fileParam = ltrim($fileParam, '/');
+
             $innerQuery = '';
             if (preg_match('#^i(?:\.php)?(?:\?|/)(.*)$#s', $fileParam, $iMatch) === 1) {
                 $inner = $iMatch[1];
-                $ampPos = strpos($inner, '&');
-                if ($ampPos !== false) {
-                    $innerQuery = substr($inner, $ampPos + 1);
-                    $inner = substr($inner, 0, $ampPos);
+                $sepPos = strcspn($inner, '?&');
+                if ($sepPos < strlen($inner)) {
+                    $innerQuery = substr($inner, $sepPos + 1);
+                    $inner = substr($inner, 0, $sepPos);
                 }
                 if ($innerQuery !== '') {
                     parse_str($innerQuery, $innerParams);
@@ -104,12 +109,33 @@ final class RequestParser
                         $pshareKey = $innerParams['pshare'];
                     }
                 }
-                $candidatePath = $config->derivativeDir . ltrim($inner, '/');
+                $decodedInner = rawurldecode($inner);
+                while (str_starts_with($decodedInner, './')) {
+                    $decodedInner = substr($decodedInner, 2);
+                }
+                $candidatePath = $config->derivativeDir . ltrim($decodedInner, '/');
                 $isDerivative = true;
             } else {
-                $candidatePath = $fileParam;
+                $qInnerPos = strpos($fileParam, '?');
+                if ($qInnerPos !== false) {
+                    $filePathPart = substr($fileParam, 0, $qInnerPos);
+                    $innerQuery = substr($fileParam, $qInnerPos + 1);
+                    if ($innerQuery !== '') {
+                        parse_str($innerQuery, $innerParams);
+                        $ajaxload = $ajaxload || (isset($innerParams['ajaxload']) && $innerParams['ajaxload'] === 'true');
+                        $cacheBuster = $cacheBuster || array_key_exists('b', $innerParams);
+                        if ($pshareKey === null && isset($innerParams['pshare']) && is_string($innerParams['pshare'])
+                            && preg_match('/^[a-zA-Z0-9]{30}$/', $innerParams['pshare']) === 1) {
+                            $pshareKey = $innerParams['pshare'];
+                        }
+                    }
+                } else {
+                    $filePathPart = $fileParam;
+                }
+                $candidatePath = rawurldecode($filePathPart);
+                $normalizedCandidate = self::stripLeadingDotSlash($candidatePath);
                 $derivPrefix = trim($config->derivativeDir, '/') . '/';
-                $isDerivative = str_starts_with(ltrim($candidatePath, '/'), $derivPrefix);
+                $isDerivative = str_starts_with($normalizedCandidate, $derivPrefix);
             }
         } else {
             // Legacy v1.x prefix URLs: /<img_id>/<rest>
@@ -132,19 +158,17 @@ final class RequestParser
                     throw new HttpException(400, 'Invalid derivative query format');
                 }
                 $decodedToken = rawurldecode($firstToken);
-                $candidatePath = $config->derivativeDir . ltrim($decodedToken, '/');
+                $candidatePath = $config->derivativeDir . ltrim(self::stripLeadingDotSlash($decodedToken), '/');
                 $isDerivative = true;
             } elseif (preg_match('#^i(?:\.php)?/(.+)$#s', $relUriPath, $pathInfoMatch) === 1) {
                 // Clean PATH_INFO derivative style: /i.php/upload/...-me.jpg or /i/upload/...-me.jpg
                 $decodedSub = rawurldecode($pathInfoMatch[1]);
-                $candidatePath = $config->derivativeDir . ltrim($decodedSub, '/');
+                $candidatePath = $config->derivativeDir . ltrim(self::stripLeadingDotSlash($decodedSub), '/');
                 $isDerivative = true;
             } else {
                 $candidatePath = rawurldecode($relUriPath);
                 $derivPrefix = trim($config->derivativeDir, '/') . '/';
-                $normalizedCandidate = str_starts_with($candidatePath, './')
-                    ? substr($candidatePath, 2)
-                    : ltrim($candidatePath, '/');
+                $normalizedCandidate = self::stripLeadingDotSlash($candidatePath);
                 $isDerivative = str_starts_with($normalizedCandidate, $derivPrefix);
             }
         }
@@ -178,11 +202,7 @@ final class RequestParser
             throw new HttpException(400, 'Path contains forbidden control characters or backslashes');
         }
 
-        $working = $path;
-        if (str_starts_with($working, './')) {
-            $working = substr($working, 2);
-        }
-        $working = ltrim($working, '/');
+        $working = self::stripLeadingDotSlash($path);
 
         if ($working === '' || str_ends_with($working, '/')) {
             throw new HttpException(400, 'Empty or directory-only path');
@@ -245,7 +265,7 @@ final class RequestParser
     /**
      * @param array<string, mixed> $server
      */
-    private static function resolveBasePath(array $server, Config $config): string
+    public static function resolveBasePath(array $server, Config $config): string
     {
         if ($config->basePath !== null) {
             return $config->basePath;
@@ -263,9 +283,19 @@ final class RequestParser
         return '/';
     }
 
+    private static function stripLeadingDotSlash(string $path): string
+    {
+        while (str_starts_with($path, './')) {
+            $path = substr($path, 2);
+        }
+        return ltrim($path, '/');
+    }
+
     private static function looksLikeMediaRoute(string $rest, Config $config): bool
     {
-        if (str_starts_with($rest, 'i.php')
+        if ($rest === 'i'
+            || $rest === 'i.php'
+            || str_starts_with($rest, 'i.php/')
             || str_starts_with($rest, 'i/')
             || str_starts_with($rest, 'i?')
             || str_starts_with($rest, $config->dataLocation)

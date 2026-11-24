@@ -34,11 +34,14 @@ final class Config
     public int $stripMetadataThreshold;
     public bool $showExif;
     public bool $enableFormats;
+    public bool $guestAccess;
     public ?string $uploadDir;
     /** @var string[] */
     public array $pictureExt;
     /** @var string[] */
     public array $fileExt;
+    /** @var string[] */
+    public array $formatExt;
     /** @var array<string, string> */
     public array $mimeTypesByExt;
 
@@ -78,24 +81,24 @@ final class Config
         $trimmedPrefix = trim($rawPrefix, '/');
         $instance->internalPrefix = $trimmedPrefix === '' ? '/' : '/' . $trimmedPrefix . '/';
 
+        $defaultRewrite = ($instance->mode === self::MODE_PHP);
         if (array_key_exists('piwigo_privacy_rewrite_urls', $conf)) {
-            $instance->rewriteUrls = (bool) $conf['piwigo_privacy_rewrite_urls'];
+            $instance->rewriteUrls = self::toBool($conf['piwigo_privacy_rewrite_urls'], $defaultRewrite);
         } else {
-            $instance->rewriteUrls = ($instance->mode === self::MODE_PHP);
+            $instance->rewriteUrls = $defaultRewrite;
         }
 
-        $instance->allowWhitespaces = ($conf['piwigo_privacy_allow_whitespaces'] ?? false) === true;
-        $instance->allowSpecialChars = ($conf['piwigo_privacy_allow_special_chars'] ?? false) === true;
-        $instance->debug = !empty($conf['piwigo_privacy_debug']);
-        $instance->defaultRedirect = !empty($conf['piwigo_privacy_default_redirect'])
-            && $conf['piwigo_privacy_default_redirect'] !== 'no';
+        $instance->allowWhitespaces = self::toBool($conf['piwigo_privacy_allow_whitespaces'] ?? false);
+        $instance->allowSpecialChars = self::toBool($conf['piwigo_privacy_allow_special_chars'] ?? false);
+        $instance->debug = self::toBool($conf['piwigo_privacy_debug'] ?? false);
+        $instance->defaultRedirect = self::toBool($conf['piwigo_privacy_default_redirect'] ?? false);
 
         $defaultImg = $conf['piwigo_privacy_default_image'] ?? null;
         $instance->defaultImage = (is_string($defaultImg) && $defaultImg !== '' && preg_match('/[\r\n]/', $defaultImg) !== 1)
             ? $defaultImg
             : null;
 
-        $instance->stripMetadata = !empty($conf['piwigo_privacy_strip_metadata']);
+        $instance->stripMetadata = self::toBool($conf['piwigo_privacy_strip_metadata'] ?? false);
 
         $cc = $conf['piwigo_privacy_cache_control'] ?? self::DEFAULT_CACHE_CONTROL;
         $instance->cacheControl = (is_string($cc) && $cc !== '' && preg_match('/[\r\n]/', $cc) !== 1)
@@ -107,7 +110,7 @@ final class Config
             ? $corp
             : self::DEFAULT_CORP;
 
-        $instance->logDenials = !empty($conf['piwigo_privacy_log_denials']);
+        $instance->logDenials = self::toBool($conf['piwigo_privacy_log_denials'] ?? false);
 
         $dataLoc = $conf['data_location'] ?? '_data/';
         $dataLocStr = is_string($dataLoc) && $dataLoc !== '' ? $dataLoc : '_data/';
@@ -143,8 +146,9 @@ final class Config
 
         $threshold = $conf['derivatives_strip_metadata_threshold'] ?? 256000;
         $instance->stripMetadataThreshold = is_numeric($threshold) ? (int) $threshold : 256000;
-        $instance->showExif = ($conf['show_exif'] ?? true) !== false;
-        $instance->enableFormats = !empty($conf['enable_formats']);
+        $instance->showExif = self::toBool($conf['show_exif'] ?? true, true);
+        $instance->enableFormats = self::toBool($conf['enable_formats'] ?? false);
+        $instance->guestAccess = self::toBool($conf['guest_access'] ?? true, true);
 
         $uploadDir = $conf['upload_dir'] ?? './upload';
         $instance->uploadDir = is_string($uploadDir) && $uploadDir !== '' ? rtrim($uploadDir, '/') : null;
@@ -161,6 +165,11 @@ final class Config
         $instance->fileExt = is_array($fileExt)
             ? array_values(array_unique(array_map(static fn (mixed $e): string => strtolower((string) $e), $fileExt)))
             : $instance->pictureExt;
+
+        $formatExt = $conf['format_ext'] ?? ['cr2', 'tif', 'tiff', 'nef', 'dng', 'ai', 'psd'];
+        $instance->formatExt = is_array($formatExt)
+            ? array_values(array_unique(array_map(static fn (mixed $e): string => strtolower((string) $e), $formatExt)))
+            : ['cr2', 'tif', 'tiff', 'nef', 'dng', 'ai', 'psd'];
 
         $mimeMap = [];
         if (isset($conf['mime_types_for_ext']) && is_array($conf['mime_types_for_ext'])) {
@@ -193,10 +202,14 @@ final class Config
         }
 
         if ($this->uploadDir !== null) {
-            $trimmed = ltrim($this->uploadDir, './');
-            if ($trimmed !== '' && !str_starts_with($this->uploadDir, '..')) {
+            $trimmed = $this->uploadDir;
+            while (str_starts_with($trimmed, './') || str_starts_with($trimmed, '../')) {
+                $trimmed = str_starts_with($trimmed, '../') ? substr($trimmed, 3) : substr($trimmed, 2);
+            }
+            $trimmed = ltrim($trimmed, '/');
+            if ($trimmed !== '' && $trimmed !== '.' && $trimmed !== '..') {
                 $first = explode('/', $trimmed)[0];
-                if ($first !== '' && !in_array($first, $roots, true)) {
+                if ($first !== '' && $first !== '.' && $first !== '..' && !in_array($first, $roots, true)) {
                     $roots[] = $first;
                 }
             }
@@ -208,5 +221,29 @@ final class Config
         }
 
         return $roots;
+    }
+
+    private static function toBool(mixed $value, bool $default = false): bool
+    {
+        if ($value === null) {
+            return $default;
+        }
+        if (is_bool($value)) {
+            return $value;
+        }
+        if (is_int($value) || is_float($value)) {
+            return (bool) $value;
+        }
+        if (is_string($value)) {
+            $norm = strtolower(trim($value));
+            if (in_array($norm, ['1', 'true', 'y', 'yes', 'on'], true)) {
+                return true;
+            }
+            if (in_array($norm, ['', '0', 'false', 'n', 'no', 'off'], true)) {
+                return false;
+            }
+            return true;
+        }
+        return (bool) $value;
     }
 }

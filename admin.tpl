@@ -63,10 +63,12 @@
   const root = btn.getAttribute('data-root') || '/';
 
   const probes = [
-    { label: 'Database config blocked (/local/config/database.inc.php)', path: 'local/config/database.inc.php', expectBlocked: true },
-    { label: 'Plugin Nginx sample blocked (/plugins/piwigo_privacy/piwigo-nginx-site)', path: 'plugins/piwigo_privacy/piwigo-nginx-site', expectBlocked: true },
-    { label: 'Raw get.php rejects missing parameters (/plugins/piwigo_privacy/get.php)', path: 'plugins/piwigo_privacy/get.php', expectBlocked: true },
-    { label: 'Unauthenticated /i.php request fails closed', path: 'i.php?/upload/nonexistent-probe-th.jpg', expectBlocked: true }
+    { label: 'Database config blocked (/local/config/database.inc.php)', path: 'local/config/database.inc.php', allowedStatuses: [403] },
+    { label: 'Private logs directory blocked (/_data/logs/)', path: '_data/logs/', allowedStatuses: [403] },
+    { label: 'Plugin Nginx sample blocked (/plugins/piwigo_privacy/piwigo-nginx-site)', path: 'plugins/piwigo_privacy/piwigo-nginx-site', allowedStatuses: [403] },
+    { label: 'Raw get.php rejects missing parameters (/plugins/piwigo_privacy/get.php)', path: 'plugins/piwigo_privacy/get.php', allowedStatuses: [400] },
+    { label: 'Direct /upload/ intercepted by get.php (not raw Nginx 404)', path: 'upload/nonexistent-probe.jpg', allowedStatuses: [401, 403], allowRedirect: true },
+    { label: 'Unauthenticated /i.php intercepted by get.php (not core 404)', path: 'i.php?/upload/nonexistent-probe-th.jpg', allowedStatuses: [401, 403], allowRedirect: true }
   ];
 
   btn.addEventListener('click', async function () {
@@ -80,8 +82,10 @@
       li.style.padding = '4px 0';
       try {
         const res = await fetch(root + p.path, { method: 'GET', credentials: 'omit', redirect: 'manual' });
-        const blocked = (res.status >= 400 || res.type === 'opaqueredirect');
-        li.textContent = (blocked ? '[PASS] ' : '[WARN] ') + p.label + ' (HTTP ' + res.status + ')';
+        const isOpaqueRedirect = res.type === 'opaqueredirect';
+        const blocked = (p.allowRedirect && isOpaqueRedirect) || p.allowedStatuses.includes(res.status);
+        const statusDesc = isOpaqueRedirect ? 'HTTP 302 redirect' : ('HTTP ' + res.status);
+        li.textContent = (blocked ? '[PASS] ' : '[WARN] ') + p.label + ' (' + statusDesc + ')';
         li.style.color = blocked ? '#1b7f3b' : '#b42318';
       } catch (err) {
         li.textContent = '[ERR] ' + p.label + ' (' + err.message + ')';

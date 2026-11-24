@@ -35,13 +35,22 @@ final class UrlRewriter
             return $url;
         }
 
-        // Prevent double-rewriting legacy /<id>/... prefix URLs.
-        if (preg_match('#^\d+/(?:upload|galleries|' . preg_quote(trim($config->dataLocation, '/'), '#') . '|i\.php|i(?:/|\?))#', $rel) === 1) {
+        // Prevent double-rewriting legacy /<id>/... prefix URLs (including custom upload_dir roots).
+        $quotedRoots = array_map(
+            static fn (string $r): string => preg_quote($r, '#'),
+            $config->getAllowedMediaRoots(true)
+        );
+        $prefixPattern = '#^\d+/(?:' . implode('|', $quotedRoots) . '|i\.php|i(?:/|\?|$))#';
+        if (preg_match($prefixPattern, $rel) === 1) {
             return $url;
         }
 
         if (!$config->rewriteUrls) {
             return $url;
+        }
+
+        if (str_starts_with($rel, '../') && $config->uploadDir !== null && str_starts_with($config->uploadDir, '../')) {
+            $rel = substr($rel, 3);
         }
 
         if ($config->mode === Config::MODE_NGINX) {
@@ -51,6 +60,14 @@ final class UrlRewriter
         return $prefixRoot
             . 'plugins/' . $config->pluginDirName . '/get.php?img_id=' . $intId
             . '&file=' . rawurlencode($rel);
+    }
+
+    public static function isExternalUrl(string $url, string $rootUrl): bool
+    {
+        if ($url === '') {
+            return false;
+        }
+        return self::splitRootPrefix($url, $rootUrl)[0] === null;
     }
 
     /**
@@ -77,7 +94,7 @@ final class UrlRewriter
     private static function splitRootPrefix(string $url, string $rootUrl): array
     {
         if ($rootUrl !== '' && str_starts_with($url, $rootUrl)) {
-            $rel = ltrim(substr($url, strlen($rootUrl)), '/');
+            $rel = self::stripLeadingDotSlash(substr($url, strlen($rootUrl)));
             if ($rootUrl === './') {
                 return ['./', $rel];
             }
@@ -92,17 +109,12 @@ final class UrlRewriter
         if (is_string($rootPathOnly) && $rootPathOnly !== '' && $rootPathOnly !== '/') {
             $normalizedRootPath = '/' . trim($rootPathOnly, '/') . '/';
             if (str_starts_with($url, $normalizedRootPath)) {
-                $rel = ltrim(substr($url, strlen($normalizedRootPath)), '/');
+                $rel = self::stripLeadingDotSlash(substr($url, strlen($normalizedRootPath)));
                 return [rtrim($rootUrl, '/') . '/', $rel];
             }
         }
 
-        $rel = $url;
-        if (str_starts_with($rel, './')) {
-            $rel = substr($rel, 2);
-        } else {
-            $rel = ltrim($rel, '/');
-        }
+        $rel = self::stripLeadingDotSlash($url);
 
         if ($rootUrl === './') {
             return ['./', $rel];
@@ -111,5 +123,13 @@ final class UrlRewriter
             return [$rootUrl === '/' ? '/' : '', $rel];
         }
         return [rtrim($rootUrl, '/') . '/', $rel];
+    }
+
+    private static function stripLeadingDotSlash(string $path): string
+    {
+        while (str_starts_with($path, './')) {
+            $path = substr($path, 2);
+        }
+        return ltrim($path, '/');
     }
 }

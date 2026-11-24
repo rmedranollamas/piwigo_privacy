@@ -49,18 +49,33 @@ include_once PHPWG_ROOT_PATH . 'include/functions_picture.inc.php';
 
 global $conf, $user;
 $confArr = is_array($conf ?? null) ? $conf : [];
-$userArr = is_array($user ?? null) ? $user : [];
+if (!is_array($user ?? null)) {
+    $user = [];
+}
 
 defined('PWG_DERIVATIVE_DIR') or define('PWG_DERIVATIVE_DIR', ($confArr['data_location'] ?? '_data/') . 'i/');
 
-$config = PiwigoPrivacy\Config::fromPiwigoConf($confArr, basename(__DIR__));
+$pluginDirName = basename(__DIR__);
+if (isset($_SERVER['SCRIPT_NAME']) && is_string($_SERVER['SCRIPT_NAME'])
+    && preg_match('#/plugins/([^/]+)/get\.php$#', $_SERVER['SCRIPT_NAME'], $dirMatch) === 1
+) {
+    $pluginDirName = $dirMatch[1];
+}
+
+$config = PiwigoPrivacy\Config::fromPiwigoConf($confArr, $pluginDirName);
 $responder = new PiwigoPrivacy\MediaResponder();
-$absoluteRootUrl = function_exists('get_absolute_root_url') ? (string) get_absolute_root_url(false) : '/';
+$absoluteRootUrl = PiwigoPrivacy\RequestParser::resolveBasePath($_SERVER, $config);
+if (function_exists('get_absolute_root_url')) {
+    $pwgAbs = (string) get_absolute_root_url(false);
+    if ($pwgAbs !== '' && preg_match('#/plugins/[^/]+/$#', $pwgAbs) !== 1) {
+        $absoluteRootUrl = $pwgAbs;
+    }
+}
 
 PiwigoPrivacy\FrontController::handle(
     $_SERVER,
     $config,
-    $userArr,
+    $user,
     PHPWG_ROOT_PATH,
     $responder,
     $absoluteRootUrl

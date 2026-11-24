@@ -9,8 +9,11 @@ declare(strict_types=1);
 define('PHPWG_ROOT_PATH', './');
 define('PHPWG_VERSION', '16.0.0');
 define('PWG_DERIVATIVE_DIR', '_data/i/');
-define('ACCESS_GUEST', 0);
-define('ACCESS_ADMINISTRATOR', 4);
+define('ACCESS_FREE', 0);
+define('ACCESS_GUEST', 1);
+define('ACCESS_CLASSIC', 2);
+define('ACCESS_ADMINISTRATOR', 3);
+define('ACCESS_WEBMASTER', 4);
 define('EVENT_HANDLER_PRIORITY_NEUTRAL', 50);
 
 define('IMAGES_TABLE', 'piwigo_images');
@@ -150,6 +153,7 @@ class pwg_image
 }
 
 function check_status(int $level): void {}
+function is_autorize_status(int $access_type, string $user_status = ''): bool { return true; }
 function is_admin(): bool { return false; }
 function is_a_guest(): bool { return true; }
 function get_boolean(mixed $var): bool { return false; }

@@ -56,6 +56,8 @@ jobs:
           echo "secret-db" | sudo tee /var/www/piwigo/local/config/database.inc.php >/dev/null
           echo "secret-log" | sudo tee /var/www/piwigo/_data/logs/test.txt >/dev/null
           printf "SECRET_JPEG_BYTES" | sudo tee /var/www/piwigo/upload/2026/secret.jpg >/dev/null
+          printf "LVL4_JPEG_BYTES" | sudo tee /var/www/piwigo/upload/2026/lvl4.jpg >/dev/null
+          printf "<svg xmlns='http://www.w3.org/2000/svg'/>" | sudo tee /var/www/piwigo/upload/2026/evil.svg >/dev/null
           echo "body{}" | sudo tee /var/www/piwigo/_data/combined/app.css >/dev/null
           echo "acme-ok" | sudo tee /var/www/piwigo/.well-known/acme-challenge/token123 >/dev/null
 
@@ -64,7 +66,7 @@ jobs:
           define('IMAGES_TABLE', 'piwigo_images');
           define('CATEGORIES_TABLE', 'piwigo_categories');
           define('IMAGE_CATEGORY_TABLE', 'piwigo_image_category');
-          define('ACCESS_GUEST', 0);
+          define('ACCESS_GUEST', 1);
           define('IMG_SQUARE', 'square');
           define('IMG_THUMB', 'thumb');
           define('IMG_XXSMALL', '2small');
@@ -81,30 +83,50 @@ jobs:
             'piwigo_privacy_redirect_header' => 'X-Accel-Redirect',
             'data_location' => '_data/',
             'picture_ext' => ['jpg', 'png', 'webp'],
-            'file_ext' => ['jpg', 'png', 'webp', 'mp4'],
+            'file_ext' => ['jpg', 'png', 'webp', 'mp4', 'svg'],
           ];
           $user = ['id' => 2, 'level' => 0, 'enabled_high' => 'false'];
           function check_status($lvl) {}
+          function is_autorize_status($lvl) { return true; }
           function is_admin() { return ($GLOBALS['user']['id'] ?? 2) === 1; }
           function is_a_guest() { return ($GLOBALS['user']['id'] ?? 2) === 2; }
           function get_boolean($v) { return $v === true || $v === 'true'; }
           function get_absolute_root_url($s = true) { return 'http://127.0.0.1:8088/'; }
           function pwg_db_real_escape_string($s) { return addslashes($s); }
+          function derivative_to_url($t) { return substr($t, 0, 2); }
           function auth_key_login($h, $b = false) {
             if ($h === 'pkid-20261116-abcdef12345678901234:citoken') {
               $GLOBALS['user']['id'] = 1;
               return true;
             }
+            if ($h === 'pkid-20261116-useruser123456789012:citokenuser') {
+              $GLOBALS['user']['id'] = 5;
+              return true;
+            }
             return false;
           }
-          function build_user($uid, $c = true) { return ['id' => $uid, 'level' => 8, 'enabled_high' => 'true']; }
+          function build_user($uid, $c = true) {
+            if ($uid === 1) {
+              return ['id' => 1, 'level' => 8, 'enabled_high' => 'true'];
+            }
+            return ['id' => $uid, 'level' => 4, 'enabled_high' => 'true'];
+          }
           function trigger_notify($e, ...$a) {}
           function get_sql_condition_FandF($f, $p = null) { return ''; }
           function pwg_query($q) {
             if (strpos($q, 'FROM `piwigo_images`') !== false) {
+              if (strpos($q, 'evil.svg') !== false) {
+                return [['id' => 8, 'path' => './upload/2026/evil.svg', 'width' => 100, 'height' => 100, 'level' => 8]];
+              }
+              if (strpos($q, 'lvl4.jpg') !== false) {
+                return [['id' => 9, 'path' => './upload/2026/lvl4.jpg', 'width' => 500, 'height' => 400, 'level' => 4]];
+              }
+              if (strpos($q, 'missing.jpg') !== false) {
+                return [['id' => 10, 'path' => './upload/2026/missing.jpg', 'width' => 500, 'height' => 400, 'level' => 0]];
+              }
               return [['id' => 7, 'path' => './upload/2026/secret.jpg', 'width' => 500, 'height' => 400, 'level' => 8]];
             }
-            return [];
+            return [['1' => 1]];
           }
           function pwg_db_fetch_assoc(&$rows) {
             $r = array_shift($rows);
@@ -112,6 +134,7 @@ jobs:
           }
           final class SizingParams {
             public function __construct(public array $ideal_size, public float $max_crop = 0.0, public ?array $min_size = null) {}
+            public static function classic($w, $h) { return new self([$w, $h]); }
           }
           final class DerivativeParams {
             public string $type = 'medium';
@@ -123,12 +146,13 @@ jobs:
             public function max_height() { return $this->sizing->ideal_size[1]; }
           }
           final class ImageStdParams {
+            public static array $custom = [];
+            public static int $quality = 95;
             public static function get_defined_type_map() {
-              $p = new DerivativeParams(new SizingParams([792, 594]));
+              $p = new DerivativeParams(SizingParams::classic(792, 594));
               return ['medium' => $p];
             }
           }
-          function derivative_to_url($t) { return substr($t, 0, 2); }
           final class SrcImage {
             public function __construct($i) {}
             public function is_original() { return true; }
@@ -168,13 +192,28 @@ jobs:
           # Guest access to /upload/secret.jpg and /i.php?/upload/... returns 401 (NOT bypassed by regex!).
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8088/upload/2026/secret.jpg)" = "401"
           test "$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8088/i.php?/upload/2026/secret-me.jpg')" = "401"
-          # Authenticated X-PIWIGO-API serves actual bytes via X-Accel-Redirect with private headers!
+          # Authenticated X-PIWIGO-API serves actual bytes via X-Accel-Redirect with ALL security & Vary headers!
           HEADERS=$(mktemp)
           BODY=$(curl -s -D "$HEADERS" -H "X-PIWIGO-API: pkid-20261116-abcdef12345678901234:citoken" http://127.0.0.1:8088/upload/2026/secret.jpg)
           cat "$HEADERS"
           grep -qi '^HTTP/.* 200' "$HEADERS"
           grep -qi '^Content-Type: image/jpeg' "$HEADERS"
           grep -qi '^Cache-Control: private' "$HEADERS"
+          grep -qi '^Vary: Cookie, X-PIWIGO-API' "$HEADERS"
           grep -qi '^X-Content-Type-Options: nosniff' "$HEADERS"
           grep -qi '^Cross-Origin-Resource-Policy: same-origin' "$HEADERS"
+          grep -qi '^Referrer-Policy: same-origin' "$HEADERS"
           test "$BODY" = "SECRET_JPEG_BYTES"
+          # ISM-2.1: SVG served via X-Accel-Redirect MUST keep Content-Security-Policy: sandbox!
+          SVG_HEADERS=$(mktemp)
+          curl -s -D "$SVG_HEADERS" -o /dev/null -H "X-PIWIGO-API: pkid-20261116-abcdef12345678901234:citoken" http://127.0.0.1:8088/upload/2026/evil.svg
+          grep -qi '^Content-Security-Policy:.*sandbox' "$SVG_HEADERS"
+          grep -qi '^X-Content-Type-Options: nosniff' "$SVG_HEADERS"
+          # ISM-1.1: Non-admin X-PIWIGO-API user accesses level-4 photo (200) and is denied 403 on level-8 photo.
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'X-PIWIGO-API: pkid-20261116-useruser123456789012:citokenuser' http://127.0.0.1:8088/upload/2026/lvl4.jpg)" = "200"
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'X-PIWIGO-API: pkid-20261116-useruser123456789012:citokenuser' http://127.0.0.1:8088/upload/2026/secret.jpg)" = "403"
+          # ISM-2.2: Missing disk file returns 404 with no-store (never max-age=300).
+          MISS_HEADERS=$(mktemp)
+          curl -s -D "$MISS_HEADERS" -o /dev/null http://127.0.0.1:8088/upload/2026/missing.jpg
+          grep -qi '^HTTP/.* 404' "$MISS_HEADERS"
+          grep -qi '^Cache-Control: private, no-store' "$MISS_HEADERS"

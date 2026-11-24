@@ -28,15 +28,11 @@ final class AccessVerifier
         array $user,
         string $rootPath,
     ): ResolvedMedia {
-        if (function_exists('check_status')) {
-            check_status(defined('ACCESS_GUEST') ? ACCESS_GUEST : 0);
-        }
-
         $isAdmin = function_exists('is_admin') ? (bool) is_admin() : false;
         $isGuest = function_exists('is_a_guest') ? (bool) is_a_guest() : true;
         $denyCode = $isGuest ? 401 : 403;
 
-        $enabledHigh = $isAdmin || self::toBool($user['enabled_high'] ?? false);
+        $enabledHigh = $isAdmin || self::isHighResEnabled($user);
 
         if ($req->isDerivativeRequest) {
             $parsed = DerivativeGenerator::parseRequestPath($req->normalizedPath, $config);
@@ -52,18 +48,23 @@ final class AccessVerifier
                 );
             }
 
-            $elementInfo = $parsed->isRepresentativeSource
-                ? self::findImageByRepresentativePath($parsed->srcRelPath, $req->imgId)
-                : self::findImageByPath($parsed->srcRelPath, $req->imgId, $config);
+            if ($parsed->isRepresentativeSource) {
+                $candidates = self::findImagesByRepresentativePath($parsed->srcRelPath, $req->imgId);
+            } else {
+                $found = self::findImageByPath($parsed->srcRelPath, $req->imgId, $config);
+                $candidates = $found !== null ? [$found] : [];
+            }
 
-            if ($elementInfo === null) {
+            if ($candidates === []) {
                 throw new HttpException($denyCode, 'Access Denied');
             }
 
-            $pshareGranted = self::authorizeImageAccess(
-                elementInfo: $elementInfo,
+            $authMatch = self::authorizeFirstCandidate(
+                candidates: $candidates,
                 isAdmin: $isAdmin,
                 user: $user,
+                config: $config,
+                isGuest: $isGuest,
                 pshareKey: $req->pshareKey,
                 denyCode: $denyCode,
                 allowPshare: true,
@@ -73,10 +74,10 @@ final class AccessVerifier
             return new ResolvedMedia(
                 kind: ResolvedMedia::KIND_DERIVATIVE,
                 serveRelPath: $parsed->derivativeRelPath,
-                elementInfo: $elementInfo,
+                elementInfo: $authMatch['elementInfo'],
                 parsedDerivative: $parsed,
                 enabledHigh: $enabledHigh,
-                grantedViaPshare: $pshareGranted,
+                grantedViaPshare: $authMatch['pshareGranted'],
             );
         }
 
@@ -84,33 +85,30 @@ final class AccessVerifier
         $parentDirName = basename(dirname($normPath));
 
         if ($parentDirName === 'pwg_representative') {
-            $elementInfo = self::findImageByRepresentativePath($normPath, $req->imgId);
-            if ($elementInfo === null) {
+            $candidates = self::findImagesByRepresentativePath($normPath, $req->imgId);
+            if ($candidates === []) {
                 throw new HttpException($denyCode, 'Access Denied');
             }
 
-            self::authorizeImageAccess(
-                elementInfo: $elementInfo,
+            $authMatch = self::authorizeFirstCandidate(
+                candidates: $candidates,
                 isAdmin: $isAdmin,
                 user: $user,
+                config: $config,
+                isGuest: $isGuest,
                 pshareKey: $req->pshareKey,
                 denyCode: $denyCode,
                 allowPshare: true,
                 pshareDerivativeType: IMG_MEDIUM,
+                checkRepresentativeHd: true,
+                enabledHigh: $enabledHigh,
             );
-
-            $srcExt = strtolower(pathinfo((string) $elementInfo['path'], PATHINFO_EXTENSION));
-            if (!$enabledHigh && in_array($srcExt, self::HIGH_RES_REP_SOURCE_EXTS, true)) {
-                $srcImage = new SrcImage($elementInfo);
-                $largest = DerivativeImage::get_one(defined('IMG_4XLARGE') ? IMG_4XLARGE : IMG_XXLARGE, $srcImage);
-                if ($largest === null || !$largest->same_as_source()) {
-                    throw new HttpException($denyCode, 'High resolution access denied');
-                }
-            }
+            $elementInfo = $authMatch['elementInfo'];
+            $pshareGranted = $authMatch['pshareGranted'];
 
             $repExt = (string) ($elementInfo['representative_ext'] ?? '');
             $canonicalRep = self::originalToRepresentative(
-                self::normalizeDbPath((string) $elementInfo['path']),
+                self::preserveDbPrefix((string) $elementInfo['path']),
                 $repExt
             );
 
@@ -120,6 +118,7 @@ final class AccessVerifier
                 elementInfo: $elementInfo,
                 parsedDerivative: null,
                 enabledHigh: $enabledHigh,
+                grantedViaPshare: $pshareGranted,
             );
         }
 
@@ -128,30 +127,46 @@ final class AccessVerifier
                 throw new HttpException($denyCode, 'Formats disabled');
             }
 
-            $matched = self::findImageByFormatPath($normPath, $req->imgId);
-            if ($matched === null) {
+            $matches = self::findImagesByFormatPath($normPath, $req->imgId);
+            if ($matches === []) {
                 throw new HttpException($denyCode, 'Access Denied');
             }
 
-            $elementInfo = $matched['image'];
-            $formatExt = $matched['ext'];
+            $lastError = null;
+            $authorizedFormat = null;
+            foreach ($matches as $matched) {
+                try {
+                    self::authorizeImageAccess(
+                        elementInfo: $matched['image'],
+                        isAdmin: $isAdmin,
+                        user: $user,
+                        config: $config,
+                        isGuest: $isGuest,
+                        pshareKey: null, // Formats are HD/RAW sidecars, not direct inline pshare assets
+                        denyCode: $denyCode,
+                        allowPshare: false,
+                        pshareDerivativeType: null,
+                    );
+                    $authorizedFormat = $matched;
+                    break;
+                } catch (HttpException $e) {
+                    $lastError = $e;
+                }
+            }
 
-            self::authorizeImageAccess(
-                elementInfo: $elementInfo,
-                isAdmin: $isAdmin,
-                user: $user,
-                pshareKey: null, // Formats are HD/RAW sidecars, not direct inline pshare assets
-                denyCode: $denyCode,
-                allowPshare: false,
-                pshareDerivativeType: null,
-            );
+            if ($authorizedFormat === null) {
+                throw $lastError;
+            }
 
             if (!$enabledHigh) {
                 throw new HttpException($denyCode, 'High resolution access denied');
             }
 
+            $elementInfo = $authorizedFormat['image'];
+            $formatExt = $authorizedFormat['ext'];
+
             $canonicalFormat = self::originalToFormat(
-                self::normalizeDbPath((string) $elementInfo['path']),
+                self::preserveDbPrefix((string) $elementInfo['path']),
                 $formatExt
             );
 
@@ -174,6 +189,8 @@ final class AccessVerifier
             elementInfo: $elementInfo,
             isAdmin: $isAdmin,
             user: $user,
+            config: $config,
+            isGuest: $isGuest,
             pshareKey: $req->pshareKey,
             denyCode: $denyCode,
             allowPshare: true,
@@ -195,10 +212,7 @@ final class AccessVerifier
             }
         }
 
-        $canonicalOriginal = (string) $elementInfo['path'];
-        if (!str_starts_with($canonicalOriginal, './') && !str_starts_with($canonicalOriginal, '../')) {
-            $canonicalOriginal = './' . ltrim($canonicalOriginal, '/');
-        }
+        $canonicalOriginal = self::preserveDbPrefix((string) $elementInfo['path']);
 
         return new ResolvedMedia(
             kind: ResolvedMedia::KIND_ORIGINAL,
@@ -212,7 +226,7 @@ final class AccessVerifier
 
     /**
      * Checks whether an unchanging derivative fallback (no-op resize returning original)
-     * violates enabled_high restrictions for non-HD users.
+     * violates enabled_high or pshare restrictions for non-HD users.
      */
     public static function assertDerivativeFallbackPermitted(ResolvedMedia $media, DerivativeResult $result): void
     {
@@ -221,7 +235,11 @@ final class AccessVerifier
         }
 
         $srcImage = new SrcImage($media->elementInfo);
-        if ($srcImage->is_original()) {
+        $isRep = $media->parsedDerivative !== null && $media->parsedDerivative->isRepresentativeSource;
+        $srcExt = strtolower(pathinfo((string) ($media->elementInfo['path'] ?? ''), PATHINFO_EXTENSION));
+        $isHighResRep = $isRep && self::isHighResRepSourceExt($srcExt);
+
+        if ($srcImage->is_original() || $isHighResRep || $media->grantedViaPshare) {
             $limitType = $media->grantedViaPshare
                 ? IMG_MEDIUM
                 : (defined('IMG_4XLARGE') ? IMG_4XLARGE : IMG_XXLARGE);
@@ -231,6 +249,19 @@ final class AccessVerifier
                 throw new HttpException($isGuest ? 401 : 403, 'High resolution fallback denied');
             }
         }
+    }
+
+    /**
+     * @param array<string, mixed> $user
+     */
+    public static function isHighResEnabled(array $user): bool
+    {
+        return self::toBool($user['enabled_high'] ?? false);
+    }
+
+    public static function isHighResRepSourceExt(string $ext): bool
+    {
+        return in_array(strtolower($ext), self::HIGH_RES_REP_SOURCE_EXTS, true);
     }
 
     /**
@@ -267,6 +298,72 @@ final class AccessVerifier
     }
 
     /**
+     * @param list<array<string, mixed>> $candidates
+     * @param array<string, mixed> $user
+     * @return array{elementInfo: array<string, mixed>, pshareGranted: bool}
+     * @throws HttpException
+     */
+    private static function authorizeFirstCandidate(
+        array $candidates,
+        bool $isAdmin,
+        array $user,
+        Config $config,
+        bool $isGuest,
+        ?string $pshareKey,
+        int $denyCode,
+        bool $allowPshare,
+        ?string $pshareDerivativeType,
+        bool $checkRepresentativeHd = false,
+        bool $enabledHigh = false,
+    ): array {
+        $lastError = null;
+        foreach ($candidates as $candidate) {
+            try {
+                $pshareGranted = self::authorizeImageAccess(
+                    elementInfo: $candidate,
+                    isAdmin: $isAdmin,
+                    user: $user,
+                    config: $config,
+                    isGuest: $isGuest,
+                    pshareKey: $pshareKey,
+                    denyCode: $denyCode,
+                    allowPshare: $allowPshare,
+                    pshareDerivativeType: $pshareDerivativeType,
+                );
+
+                if ($checkRepresentativeHd) {
+                    $srcExt = strtolower(pathinfo((string) ($candidate['path'] ?? ''), PATHINFO_EXTENSION));
+                    $isHighResRepSource = self::isHighResRepSourceExt($srcExt);
+                    if ($pshareGranted) {
+                        if ($isHighResRepSource) {
+                            $srcImage = new SrcImage($candidate);
+                            $med = DerivativeImage::get_one(IMG_MEDIUM, $srcImage);
+                            if ($med === null || !$med->same_as_source()) {
+                                throw new HttpException($denyCode, 'Shared access limited to medium derivative');
+                            }
+                        }
+                    } elseif (!$enabledHigh && $isHighResRepSource) {
+                        $srcImage = new SrcImage($candidate);
+                        $largest = DerivativeImage::get_one(defined('IMG_4XLARGE') ? IMG_4XLARGE : IMG_XXLARGE, $srcImage);
+                        if ($largest === null || !$largest->same_as_source()) {
+                            throw new HttpException($denyCode, 'High resolution access denied');
+                        }
+                    }
+                }
+
+                return [
+                    'elementInfo' => $candidate,
+                    'pshareGranted' => $pshareGranted,
+                ];
+            } catch (HttpException $e) {
+                $lastError = $e;
+            }
+        }
+
+        throw $lastError ?? new HttpException($denyCode, 'Access Denied');
+    }
+
+    /**
      * @param array<string, mixed> $elementInfo
      * @param array<string, mixed> $user
      * @throws HttpException
@@ -275,6 +372,8 @@ final class AccessVerifier
         array $elementInfo,
         bool $isAdmin,
         array $user,
+        Config $config,
+        bool $isGuest,
         ?string $pshareKey,
         int $denyCode,
         bool $allowPshare,
@@ -297,6 +396,16 @@ final class AccessVerifier
             return true;
         }
 
+        // Enforce guest_access=false cleanly with 401 instead of core check_status()/access_denied() HTML redirects.
+        if (function_exists('is_autorize_status')) {
+            $requiredAccess = defined('ACCESS_GUEST') ? ACCESS_GUEST : 1;
+            if (!is_autorize_status($requiredAccess)) {
+                throw new HttpException($denyCode, 'Guest access disabled');
+            }
+        } elseif (!$config->guestAccess && $isGuest) {
+            throw new HttpException($denyCode, 'Guest access disabled');
+        }
+
         $userLevel = isset($user['level']) && is_numeric($user['level']) ? (int) $user['level'] : 0;
         $imageLevel = isset($elementInfo['level']) && is_numeric($elementInfo['level']) ? (int) $elementInfo['level'] : 0;
         if ($imageLevel > $userLevel) {
@@ -305,11 +414,11 @@ final class AccessVerifier
 
         $fandf = '';
         if (function_exists('get_sql_condition_FandF')) {
-            // Passing 'i.id' ensures Piwigo always emits 'i.level <= $user[level]' cleanly.
+            // Passing 'ic.image_id' enforces both category exclusions and per-image image_access_list ACLs.
             $fandf = (string) get_sql_condition_FandF(
                 [
                     'forbidden_categories' => 'ic.category_id',
-                    'forbidden_images' => 'i.id',
+                    'forbidden_images' => 'ic.image_id',
                 ],
                 ' AND '
             );
@@ -365,20 +474,20 @@ final class AccessVerifier
     /**
      * Resolves a pwg_representative path safely without dotless '.' collisions or prefix leaks (SEC-03).
      *
-     * @return array<string, mixed>|null
+     * @return list<array<string, mixed>>
      */
-    private static function findImageByRepresentativePath(string $normRepPath, ?int $expectedId): ?array
+    private static function findImagesByRepresentativePath(string $normRepPath, ?int $expectedId): array
     {
         $repDir = dirname($normRepPath);
         if (basename($repDir) !== 'pwg_representative') {
-            return null;
+            return [];
         }
 
         $parentDir = dirname($repDir);
         $stem = pathinfo($normRepPath, PATHINFO_FILENAME);
         $repExt = pathinfo($normRepPath, PATHINFO_EXTENSION);
         if ($stem === '' || $repExt === '' || $parentDir === '' || $parentDir === '.') {
-            return null;
+            return [];
         }
 
         $prefixWithDot = $parentDir . '/' . $stem . '.';
@@ -392,8 +501,10 @@ final class AccessVerifier
             . ' OR path LIKE \'' . self::escapeLike($parentUploadPrefix) . '%\')'
             . ' AND representative_ext IS NOT NULL AND representative_ext <> \'\''
             . $idClause
-            . ' LIMIT 25;';
+            . ' ORDER BY LENGTH(path) ASC'
+            . ' LIMIT 100;';
 
+        $matches = [];
         $rows = self::fetchAll($query);
         foreach ($rows as $row) {
             $rowPath = isset($row['path']) && is_string($row['path']) ? self::normalizeDbPath($row['path']) : '';
@@ -407,42 +518,46 @@ final class AccessVerifier
             }
             $expectedRep = self::originalToRepresentative($rowPath, $rowRepExt);
             if ($expectedRep === $normRepPath && ($expectedId === null || (int) $row['id'] === $expectedId)) {
-                return $row;
+                $matches[] = $row;
             }
         }
 
-        return null;
+        return $matches;
     }
 
     /**
      * Resolves a pwg_format/<stem>.<ext> file against images + image_format tables.
      *
-     * @return array{image: array<string, mixed>, ext: string}|null
+     * @return list<array{image: array<string, mixed>, ext: string}>
      */
-    private static function findImageByFormatPath(string $normFormatPath, ?int $expectedId): ?array
+    private static function findImagesByFormatPath(string $normFormatPath, ?int $expectedId): array
     {
         $fmtDir = dirname($normFormatPath);
         if (basename($fmtDir) !== 'pwg_format') {
-            return null;
+            return [];
         }
 
         $parentDir = dirname($fmtDir);
         $stem = pathinfo($normFormatPath, PATHINFO_FILENAME);
         $fmtExt = pathinfo($normFormatPath, PATHINFO_EXTENSION);
         if ($stem === '' || $fmtExt === '' || $parentDir === '' || $parentDir === '.') {
-            return null;
+            return [];
         }
 
         $prefixWithDot = $parentDir . '/' . $stem . '.';
         $prefixNoDot = str_starts_with($prefixWithDot, './') ? substr($prefixWithDot, 2) : $prefixWithDot;
+        $parentUploadPrefix = '../' . $prefixNoDot;
         $idClause = $expectedId !== null ? ' AND id = ' . $expectedId : '';
 
         $query = 'SELECT * FROM `' . IMAGES_TABLE . '`'
             . ' WHERE (path LIKE \'' . self::escapeLike($prefixWithDot) . '%\''
-            . ' OR path LIKE \'' . self::escapeLike($prefixNoDot) . '%\')'
+            . ' OR path LIKE \'' . self::escapeLike($prefixNoDot) . '%\''
+            . ' OR path LIKE \'' . self::escapeLike($parentUploadPrefix) . '%\')'
             . $idClause
-            . ' LIMIT 25;';
+            . ' ORDER BY LENGTH(path) ASC'
+            . ' LIMIT 100;';
 
+        $matches = [];
         $rows = self::fetchAll($query);
         foreach ($rows as $row) {
             $rowPath = isset($row['path']) && is_string($row['path']) ? self::normalizeDbPath($row['path']) : '';
@@ -459,14 +574,14 @@ final class AccessVerifier
                 continue;
             }
             if (self::originalToFormat($rowPath, $fmtRow['ext']) === $normFormatPath) {
-                return [
+                $matches[] = [
                     'image' => $row,
                     'ext' => $fmtRow['ext'],
                 ];
             }
         }
 
-        return null;
+        return $matches;
     }
 
     private static function hasValidPshareKey(int $imageId, string $key): bool
@@ -480,6 +595,14 @@ final class AccessVerifier
             . ' AND expire_on >= NOW()'
             . ' LIMIT 1;';
         return self::fetchAssoc($query) !== null;
+    }
+
+    private static function preserveDbPrefix(string $path): string
+    {
+        if (str_starts_with($path, './') || str_starts_with($path, '../')) {
+            return $path;
+        }
+        return './' . ltrim($path, '/');
     }
 
     private static function normalizeDbPath(string $path): string
