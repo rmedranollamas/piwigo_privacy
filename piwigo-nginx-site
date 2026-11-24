@@ -124,30 +124,52 @@ server {
 	# Scoped Internal Aliases for X-Accel-Redirect Zero-Copy Delivery
 	# Only callable internally by get.php / action.php; immune to regex overrides (^~).
 	# Must stay aligned with $conf['piwigo_privacy_internal_prefix'] = '/_pwg_priv/'.
+	# Nginx strips non-whitelisted upstream FastCGI headers (like nosniff/CORP) on
+	# X-Accel-Redirect, so security headers are re-asserted directly on these blocks.
 	# ------------------------------------------------------------------
 	location ^~ /_pwg_priv/upload/ {
 		internal;
 		alias /var/www/piwigo/upload/;
+		add_header X-Content-Type-Options "nosniff" always;
+		add_header Cross-Origin-Resource-Policy "same-origin" always;
+		add_header Referrer-Policy "same-origin" always;
+		add_header Vary "Cookie, X-PIWIGO-API" always;
 	}
 
 	location ^~ /_pwg_priv/galleries/ {
 		internal;
 		alias /var/www/piwigo/galleries/;
+		add_header X-Content-Type-Options "nosniff" always;
+		add_header Cross-Origin-Resource-Policy "same-origin" always;
+		add_header Referrer-Policy "same-origin" always;
+		add_header Vary "Cookie, X-PIWIGO-API" always;
 	}
 
 	location ^~ /_pwg_priv/_data/i/ {
 		internal;
 		alias /var/www/piwigo/_data/i/;
+		add_header X-Content-Type-Options "nosniff" always;
+		add_header Cross-Origin-Resource-Policy "same-origin" always;
+		add_header Referrer-Policy "same-origin" always;
+		add_header Vary "Cookie, X-PIWIGO-API" always;
 	}
 
 	location ^~ /_pwg_priv/themes/ {
 		internal;
 		alias /var/www/piwigo/themes/;
+		add_header X-Content-Type-Options "nosniff" always;
+		add_header Cross-Origin-Resource-Policy "same-origin" always;
+		add_header Referrer-Policy "same-origin" always;
+		add_header Vary "Cookie, X-PIWIGO-API" always;
 	}
 
 	location ^~ /_pwg_priv/plugins/ {
 		internal;
 		alias /var/www/piwigo/plugins/;
+		add_header X-Content-Type-Options "nosniff" always;
+		add_header Cross-Origin-Resource-Policy "same-origin" always;
+		add_header Referrer-Policy "same-origin" always;
+		add_header Vary "Cookie, X-PIWIGO-API" always;
 	}
 
 	# ------------------------------------------------------------------

@@ -75,17 +75,18 @@ $rNginx = new FakeResponse();
 $rNginx->createResponder()->serveFile('./upload/2026/a+b/clip #1.mp4', $root . '/', $nginxCfg, [], false);
 
 Assert::same('/_pwg_priv/upload/2026/a%2Bb/clip%20%231.mp4', $rNginx->getHeader('X-Accel-Redirect'));
-Assert::false($rNginx->hasHeaderPrefix('Content-Type:'));
+Assert::same('video/mp4', $rNginx->getHeader('Content-Type'));
 Assert::same('private, max-age=300, must-revalidate', $rNginx->getHeader('Cache-Control'));
 Assert::same('Cookie, X-PIWIGO-API', $rNginx->getHeader('Vary'));
 Assert::same('nosniff', $rNginx->getHeader('X-Content-Type-Options'));
 Assert::same('same-origin', $rNginx->getHeader('Cross-Origin-Resource-Policy'));
 
-// 2. Cache-buster (&b=) switches Cache-Control to no-store, SVG emits sandbox CSP!
+// 2. Cache-buster (&b=) switches Cache-Control to no-store, SVG emits sandbox CSP & attachment disposition!
 $rSvg = new FakeResponse();
 $rSvg->createResponder()->serveFile('./upload/2026/vector.svg', $root . '/', $nginxCfg, [], true);
 Assert::same('private, no-store, max-age=0', $rSvg->getHeader('Cache-Control'));
 Assert::contains('sandbox', (string) $rSvg->getHeader('Content-Security-Policy'));
+Assert::contains('attachment', (string) $rSvg->getHeader('Content-Disposition'));
 
 // 3. Standalone PHP mode: 2026 MIME table & 200 OK without illegal Content-Range / Connection: close.
 $phpCfg = Config::fromPiwigoConf([

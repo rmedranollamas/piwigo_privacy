@@ -119,8 +119,14 @@ final class MediaResponder
 
         $this->emitSecurityAndCacheHeaders($config, $ext, $cacheBuster);
 
+        $mime = self::guessMimeType($ext, $config);
+        ($this->headerEmitter)('Content-Type: ' . $mime);
+
         if ($config->mode === Config::MODE_NGINX && $config->redirectHeader !== null) {
-            // Do NOT set Content-Type here; allow Nginx /etc/nginx/mime.types & native Range/ETag to apply.
+            if (in_array($ext, ['svg', 'svgz', 'html', 'htm', 'xml'], true)) {
+                $safeName = preg_replace('/[^\x20-\x7E]/', '_', str_replace(['"', '\\', "\r", "\n"], '_', basename($relPath)));
+                ($this->headerEmitter)('Content-Disposition: attachment; filename="' . $safeName . '"');
+            }
             $internalUri = self::buildInternalRedirectPath($relPath, $config->internalPrefix);
             ($this->headerEmitter)($config->redirectHeader . ': ' . $internalUri);
             return;
@@ -150,9 +156,6 @@ final class MediaResponder
                 ($this->statusEmitter)(304);
                 return;
             }
-
-            $mime = self::guessMimeType($ext, $config);
-            ($this->headerEmitter)('Content-Type: ' . $mime);
 
             $rangeSupported = in_array($ext, self::RANGE_EXTS, true);
             $method = strtoupper(isset($server['REQUEST_METHOD']) && is_string($server['REQUEST_METHOD'])

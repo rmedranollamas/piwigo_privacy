@@ -173,6 +173,8 @@ jobs:
           BODY=$(curl -s -D "$HEADERS" -H "X-PIWIGO-API: pkid-20261116-abcdef12345678901234:citoken" http://127.0.0.1:8088/upload/2026/secret.jpg)
           cat "$HEADERS"
           grep -qi '^HTTP/.* 200' "$HEADERS"
+          grep -qi '^Content-Type: image/jpeg' "$HEADERS"
           grep -qi '^Cache-Control: private' "$HEADERS"
           grep -qi '^X-Content-Type-Options: nosniff' "$HEADERS"
+          grep -qi '^Cross-Origin-Resource-Policy: same-origin' "$HEADERS"
           test "$BODY" = "SECRET_JPEG_BYTES"

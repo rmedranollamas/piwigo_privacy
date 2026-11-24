@@ -144,6 +144,9 @@ function pwg_privacy_harden_action_download(): void
         header('Content-Disposition: inline; filename="' . $safeAscii . '"');
     }
 
+    $mime = PiwigoPrivacy\MediaResponder::guessMimeType($ext, $config);
+    header('Content-Type: ' . $mime);
+
     $internalUri = PiwigoPrivacy\MediaResponder::buildInternalRedirectPath('./' . $rel, $config->internalPrefix);
     header($config->redirectHeader . ': ' . $internalUri);
     exit();
