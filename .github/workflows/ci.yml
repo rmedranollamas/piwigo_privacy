@@ -98,6 +98,25 @@ jobs:
             $r = array_shift($rows);
             return $r === null ? false : $r;
           }
+          final class SizingParams {
+            public function __construct(public array $ideal_size, public float $max_crop = 0.0, public ?array $min_size = null) {}
+          }
+          final class DerivativeParams {
+            public string $type = 'medium';
+            public int $last_mod_time = 1700000000;
+            public bool $use_watermark = false;
+            public float $sharpen = 0.0;
+            public function __construct(public SizingParams $sizing) {}
+            public function max_width() { return $this->sizing->ideal_size[0]; }
+            public function max_height() { return $this->sizing->ideal_size[1]; }
+          }
+          final class ImageStdParams {
+            public static function get_defined_type_map() {
+              $p = new DerivativeParams(new SizingParams([792, 594]));
+              return ['medium' => $p];
+            }
+          }
+          function derivative_to_url($t) { return substr($t, 0, 2); }
           final class SrcImage {
             public function __construct($i) {}
             public function is_original() { return true; }
@@ -123,7 +142,8 @@ jobs:
 
       - name: Assert security perimeter, X-Accel-Redirect, and i.php routing via HTTP
         run: |
-          set -euo pipefail
+          set -euxo pipefail
+          trap 'echo "--- NGINX ERROR LOG ---"; sudo tail -n 50 /var/log/nginx/piwigo.error.log || true' ERR
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8088/local/config/database.inc.php)" = "403"
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8088/_data/logs/test.txt)" = "403"
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8088/plugins/piwigo_privacy/piwigo-nginx-site)" = "403"
