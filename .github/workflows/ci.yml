@@ -65,6 +65,18 @@ jobs:
           define('CATEGORIES_TABLE', 'piwigo_categories');
           define('IMAGE_CATEGORY_TABLE', 'piwigo_image_category');
           define('ACCESS_GUEST', 0);
+          define('IMG_SQUARE', 'square');
+          define('IMG_THUMB', 'thumb');
+          define('IMG_XXSMALL', '2small');
+          define('IMG_XSMALL', 'xsmall');
+          define('IMG_SMALL', 'small');
+          define('IMG_MEDIUM', 'medium');
+          define('IMG_LARGE', 'large');
+          define('IMG_XLARGE', 'xlarge');
+          define('IMG_XXLARGE', 'xxlarge');
+          define('IMG_3XLARGE', '3xlarge');
+          define('IMG_4XLARGE', '4xlarge');
+          define('IMG_CUSTOM', 'custom');
           $conf = [
             'piwigo_privacy_redirect_header' => 'X-Accel-Redirect',
             'data_location' => '_data/',
